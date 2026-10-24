@@ -93,3 +93,83 @@ Use IDs in `[0, 2^M)` with `1 <= M <= 160`; peers must use the same M. Configure
 for the intended ring size/failure tolerance; the paper's probabilistic analysis
 assumes a successor-list length proportional to log N. Arbitrary network
 partitions and disjoint cycles have no automatic healing guarantee.
+
+## Comparing Chord against Chord + standard SWIM
+
+Use the **shared local comparison harness** for a paired experiment. It runs both
+executables sequentially with the same IDs, Chord configuration, offered lookup
+schedule, fault target, and independent owner oracle. It alternates execution
+order across repetitions. The older Docker baseline and standalone SWIM verifier
+results use different scenarios; do not compare their numbers directly.
+
+```bash
+(cd baseline_chord && go build -o /tmp/chord-compare-baseline .)
+(cd chord_standard_swim && go build -o /tmp/chord-compare-swim .)
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline \
+  --swim-binary /tmp/chord-compare-swim \
+  --repeats 3 --output reports/chord-swim-comparison.json
+python3 -m unittest orchestrator.test_compare_variants \
+  orchestrator.test_standard_swim_verify orchestrator.test_runner -v
+```
+
+Both variants export these phases with identical summary fields:
+
+| Phase | Condition and oracle |
+|---|---|
+| `healthy` | Converged ring; all nodes are owners |
+| `gray_failure` | One process stays alive; every incoming peer RPC to it is delayed; all nodes remain owners |
+| `gray_recovered` | Delay removed and routing/membership reconverged before measuring |
+| `crash_recovery` | Same process hard-killed; continuous scheduled lookups among survivors, using survivor ownership |
+| `post_crash` | Surviving routing tables and membership converged |
+| `restart` | Same identity/address restarted and reconverged; all nodes become owners again |
+
+Output files are [the comparison table](reports/chord-swim-comparison.md),
+[raw JSON](reports/chord-swim-comparison.json), and
+[per-run CSV](reports/chord-swim-comparison.csv). JSON contains each request,
+configuration, binary hashes, metric snapshots/deltas, peer traffic, and SWIM
+structured events. CSV has one row per variant, repetition and phase; missing
+measurements are blank. Both variants report oracle correctness separately from
+RPC success, p50/p95/p99 latency, correct-lookup mean hops, peer requests/body
+bytes, and whole-process Go heap. SWIM-only counters and membership entries are
+`null` for the baseline, rather than invented zeros.
+
+Defaults: four nodes, four-bit ID space, successor-list size three, Chord
+stabilization/predecessor checks every 200ms, finger fixing every 100ms, Chord RPC
+timeout 250ms; SWIM interval 200ms, direct timeout 50ms, two helpers, suspicion
+1200ms. Four-second ordinary phases offer 24 queries/second; crash observation
+lasts six seconds. Configure these with `--nodes`, `--m`, `--stabilize-ms`,
+`--fix-ms`, `--phase-seconds`, `--recovery-seconds`, `--rate`, `--seed`, and
+`--gray-delay-ms`. Use the same build flags for both binaries; the measured
+comparison uses ordinary builds. For race checks, build **both** with `-race` in
+a separate verification run, rather than comparing an instrumented binary with
+an uninstrumented one.
+
+The gray fault is a **100ms application-level forwarding delay** by default,
+applied through a proxy to both Chord and SWIM peer RPCs. Client lookup and
+management requests access the backend directly. The fault lasts the configured
+phase duration; requests already delayed can finish after removal. This models a
+slow reachable peer, not packet-level congestion, packet loss, or Docker netem.
+The local proxy adds overhead to both variants. Proxy counters count each
+request at its destination and request/response bodies once, excluding headers
+and TCP/IP overhead; errors can include client disconnects. Metric snapshots
+bracket each phase, so traffic includes background work and small scrape/drain
+boundary effects. Heap snapshots exclude the Python proxy and are not
+protocol-specific memory measurements.
+
+Recovery requires at least 99% oracle correctness **per survivor** in two
+consecutive one-second cohorts. Completion time is included: late replies cannot
+backdate recovery. This conservative statistic has a two-second minimum and
+cannot distinguish faster recovery below that resolution. Missing recovery is
+`null`, never zero. The same seeded keys and offered schedules are used for each
+paired phase; raw samples retain scheduling and completion times. In-flight
+requests are bounded, and harness overload is recorded as a failed sample.
+Routing convergence checks all fingers, neighbors and successor lists; lookup
+samples themselves do not prove all-key correctness for arbitrary rings.
+
+Three local repetitions provide descriptive medians and ranges, not statistical
+proof that one protocol is better. Compare correctness, tail latency, recovery,
+and traffic/memory overhead together. A fast Chord lookup fallback can recover
+before SWIM confirms death, so SWIM detection and lookup recovery are different
+measurements. No node implementation or existing baseline benchmark is changed
+by this shared harness.
