@@ -1,0 +1,273 @@
+{
+  "case": "baseline_chord",
+  "healthy": {
+    "queries": 30,
+    "correct": 30,
+    "correctness_pct": 100.0,
+    "latency_p50_ms": 1.2329079991104663,
+    "latency_p95_ms": 2.0866700006081373,
+    "latency_p99_ms": 2.1746849997725803
+  },
+  "gray_failure": {
+    "queries": 30,
+    "correct": 30,
+    "correctness_pct": 100.0,
+    "latency_p50_ms": 566.5304309995918,
+    "latency_p95_ms": 1012.2126269998262,
+    "latency_p99_ms": 1922.427948999939
+  },
+  "recovery_time_sec": 0.5146353244781494,
+  "post_crash": {
+    "queries": 30,
+    "correct": 30,
+    "correctness_pct": 100.0,
+    "latency_p50_ms": 1.2789370002792566,
+    "latency_p95_ms": 3.3283430002484238,
+    "latency_p99_ms": 3.937899999982619
+  },
+  "telemetry": {
+    "node_count": 8,
+    "total_msgs_sent": 12346,
+    "total_bytes_sent": 149239,
+    "avg_alloc_bytes": 1693099.0,
+    "raw": [
+      {
+        "port": 8000,
+        "metrics": {
+          "latency_p50_ms": 0.451,
+          "latency_p95_ms": 637.284,
+          "latency_p99_ms": 637.284,
+          "lookup_failed": 0,
+          "lookup_success": 13,
+          "lookups_total": 13,
+          "network": {
+            "bytes_received": 113373,
+            "bytes_sent": 22994,
+            "msgs_received": 1917,
+            "msgs_sent": 1918
+          },
+          "repair_counts": {
+            "alternate_candidate_fallback": 1,
+            "fix_finger": 305
+          },
+          "storage": {
+            "alloc_bytes": 1950720,
+            "goroutines": 33,
+            "num_gc": 4,
+            "sys_bytes": 18471176,
+            "total_alloc_bytes": 10272184
+          },
+          "success_rate": 100,
+          "uptime_seconds": 32.34867579
+        }
+      },
+      {
+        "port": 8001,
+        "metrics": {
+          "latency_p50_ms": 0.516,
+          "latency_p95_ms": 2.107,
+          "latency_p99_ms": 2.107,
+          "lookup_failed": 0,
+          "lookup_success": 12,
+          "lookups_total": 12,
+          "network": {
+            "bytes_received": 112127,
+            "bytes_sent": 22842,
+            "msgs_received": 1678,
+            "msgs_sent": 1678
+          },
+          "repair_counts": {
+            "fix_finger": 319
+          },
+          "storage": {
+            "alloc_bytes": 1769944,
+            "goroutines": 31,
+            "num_gc": 4,
+            "sys_bytes": 14276872,
+            "total_alloc_bytes": 9704200
+          },
+          "success_rate": 100,
+          "uptime_seconds": 32.077520854
+        }
+      },
+      {
+        "port": 8002,
+        "metrics": {
+          "latency_p50_ms": 0,
+          "latency_p95_ms": 0,
+          "latency_p99_ms": 0,
+          "lookup_failed": 0,
+          "lookup_success": 0,
+          "lookups_total": 0,
+          "network": {
+            "bytes_received": 13529,
+            "bytes_sent": 2604,
+            "msgs_received": 215,
+            "msgs_sent": 215
+          },
+          "repair_counts": {
+            "fix_finger": 39
+          },
+          "storage": {
+            "alloc_bytes": 1880104,
+            "goroutines": 19,
+            "num_gc": 0,
+            "sys_bytes": 13326600,
+            "total_alloc_bytes": 1880104
+          },
+          "success_rate": 0,
+          "uptime_seconds": 4.00722317
+        }
+      },
+      {
+        "port": 8003,
+        "metrics": {
+          "latency_p50_ms": 0.505,
+          "latency_p95_ms": 385.963,
+          "latency_p99_ms": 385.963,
+          "lookup_failed": 0,
+          "lookup_success": 11,
+          "lookups_total": 11,
+          "network": {
+            "bytes_received": 77418,
+            "bytes_sent": 15932,
+            "msgs_received": 1381,
+            "msgs_sent": 1381
+          },
+          "repair_counts": {
+            "fix_finger": 222
+          },
+          "storage": {
+            "alloc_bytes": 1704648,
+            "goroutines": 25,
+            "num_gc": 3,
+            "sys_bytes": 14268680,
+            "total_alloc_bytes": 7962392
+          },
+          "success_rate": 100,
+          "uptime_seconds": 31.532546633
+        }
+      },
+      {
+        "port": 8004,
+        "metrics": {
+          "latency_p50_ms": 1.159,
+          "latency_p95_ms": 706.599,
+          "latency_p99_ms": 706.599,
+          "lookup_failed": 0,
+          "lookup_success": 13,
+          "lookups_total": 13,
+          "network": {
+            "bytes_received": 79813,
+            "bytes_sent": 16678,
+            "msgs_received": 1622,
+            "msgs_sent": 1622
+          },
+          "repair_counts": {
+            "fix_finger": 221
+          },
+          "storage": {
+            "alloc_bytes": 2002800,
+            "goroutines": 27,
+            "num_gc": 3,
+            "sys_bytes": 18733320,
+            "total_alloc_bytes": 8493408
+          },
+          "success_rate": 100,
+          "uptime_seconds": 31.662815335
+        }
+      },
+      {
+        "port": 8005,
+        "metrics": {
+          "latency_p50_ms": 0.652,
+          "latency_p95_ms": 1921.605,
+          "latency_p99_ms": 1921.605,
+          "lookup_failed": 0,
+          "lookup_success": 8,
+          "lookups_total": 8,
+          "network": {
+            "bytes_received": 106367,
+            "bytes_sent": 21555,
+            "msgs_received": 1837,
+            "msgs_sent": 1842
+          },
+          "repair_counts": {
+            "alternate_candidate_fallback": 1,
+            "fix_finger": 307,
+            "lookup_successor_failure_eviction": 2,
+            "successor_failure_eviction": 1
+          },
+          "storage": {
+            "alloc_bytes": 1204576,
+            "goroutines": 31,
+            "num_gc": 4,
+            "sys_bytes": 18733320,
+            "total_alloc_bytes": 9675192
+          },
+          "success_rate": 100,
+          "uptime_seconds": 31.809842058
+        }
+      },
+      {
+        "port": 8006,
+        "metrics": {
+          "latency_p50_ms": 0.527,
+          "latency_p95_ms": 339.137,
+          "latency_p99_ms": 665.376,
+          "lookup_failed": 0,
+          "lookup_success": 23,
+          "lookups_total": 23,
+          "network": {
+            "bytes_received": 113079,
+            "bytes_sent": 23563,
+            "msgs_received": 1779,
+            "msgs_sent": 1780
+          },
+          "repair_counts": {
+            "check_predecessor_failed": 1,
+            "fix_finger": 307
+          },
+          "storage": {
+            "alloc_bytes": 949192,
+            "goroutines": 29,
+            "num_gc": 4,
+            "sys_bytes": 18479368,
+            "total_alloc_bytes": 9864000
+          },
+          "success_rate": 100,
+          "uptime_seconds": 31.389947748
+        }
+      },
+      {
+        "port": 8007,
+        "metrics": {
+          "latency_p50_ms": 0.511,
+          "latency_p95_ms": 567.755,
+          "latency_p99_ms": 567.755,
+          "lookup_failed": 0,
+          "lookup_success": 7,
+          "lookups_total": 7,
+          "network": {
+            "bytes_received": 113760,
+            "bytes_sent": 23071,
+            "msgs_received": 1910,
+            "msgs_sent": 1910
+          },
+          "repair_counts": {
+            "fix_finger": 314
+          },
+          "storage": {
+            "alloc_bytes": 2082808,
+            "goroutines": 28,
+            "num_gc": 4,
+            "sys_bytes": 14547208,
+            "total_alloc_bytes": 10286216
+          },
+          "success_rate": 100,
+          "uptime_seconds": 32.234021632
+        }
+      }
+    ]
+  }
+}
