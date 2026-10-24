@@ -108,16 +108,9 @@ func calculatePercentiles(data []float64) (p50, p95, p99 float64) {
 	}
 	sort.Float64s(data)
 	n := len(data)
-	p50 = data[int(float64(n)*0.50)]
-	idx95 := int(float64(n) * 0.95)
-	if idx95 >= n {
-		idx95 = n - 1
-	}
-	p95 = data[idx95]
-	idx99 := int(float64(n) * 0.99)
-	if idx99 >= n {
-		idx99 = n - 1
-	}
-	p99 = data[idx99]
+	// Nearest-rank percentiles, shared with the orchestrator.
+	p50 = data[(n*50+99)/100-1]
+	p95 = data[(n*95+99)/100-1]
+	p99 = data[(n*99+99)/100-1]
 	return p50, p95, p99
 }

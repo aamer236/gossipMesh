@@ -12,16 +12,16 @@ import (
 )
 
 type Config struct {
-	Port                int
-	AdvertiseAddr       string
-	NodeID              *big.Int
-	BootstrapAddr       string
-	M                   int
-	R                   int
-	StabilizeInterval   time.Duration
-	FixFingersInterval  time.Duration
-	CheckPredInterval   time.Duration
-	RPCTimeout          time.Duration
+	Port               int
+	AdvertiseAddr      string
+	NodeID             *big.Int
+	BootstrapAddr      string
+	M                  int
+	R                  int
+	StabilizeInterval  time.Duration
+	FixFingersInterval time.Duration
+	CheckPredInterval  time.Duration
+	RPCTimeout         time.Duration
 }
 
 func loadConfig() (*Config, error) {
@@ -48,16 +48,20 @@ func loadConfig() (*Config, error) {
 
 	m := 160
 	if mStr := os.Getenv("M"); mStr != "" {
-		if val, err := strconv.Atoi(mStr); err == nil && val > 0 {
-			m = val
+		val, err := strconv.Atoi(mStr)
+		if err != nil || val < 1 || val > 160 {
+			return nil, fmt.Errorf("M must be between 1 and 160")
 		}
+		m = val
 	}
 
 	r := 4
 	if rStr := os.Getenv("R"); rStr != "" {
-		if val, err := strconv.Atoi(rStr); err == nil && val > 0 {
-			r = val
+		val, err := strconv.Atoi(rStr)
+		if err != nil || val < 1 {
+			return nil, fmt.Errorf("R must be positive")
 		}
+		r = val
 	}
 
 	var nodeID *big.Int
@@ -71,6 +75,15 @@ func loadConfig() (*Config, error) {
 		nodeID = HashKey(advertiseAddr, m)
 	}
 
+	if !validID(nodeID, m) {
+		return nil, fmt.Errorf("NODE_ID must be in [0, 2^M)")
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("PORT must be between 1 and 65535")
+	}
+	if _, _, err := net.SplitHostPort(advertiseAddr); err != nil {
+		return nil, fmt.Errorf("invalid ADVERTISE_ADDR: %w", err)
+	}
 	bootstrapAddr := os.Getenv("BOOTSTRAP_ADDR")
 
 	stabMs := 200
@@ -145,9 +158,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to start listener on port %d: %v\n", cfg.Port, err)
 		os.Exit(1)
 	}
-
-	// Wait briefly for listener to be active
-	time.Sleep(100 * time.Millisecond)
 
 	// Join ring
 	if cfg.BootstrapAddr != "" && cfg.BootstrapAddr != cfg.AdvertiseAddr {

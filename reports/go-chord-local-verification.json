@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-25",
+  "base_commit": "9daaabbe95504a52b57986a1d81cc279f7950afd",
+  "implementation": "working-tree paper-alignment fixes",
+  "runtime": "go1.26.8 linux/amd64",
+  "race_enabled_binary": true,
+  "nodes": 8,
+  "identifier_bits": 160,
+  "successor_list_capacity": 4,
+  "maintenance_intervals_ms": {
+    "stabilize": 10,
+    "fix_fingers": 5,
+    "check_predecessor": 15
+  },
+  "convergence_gate": "correct predecessors, successors, all fingers and successor lists in two consecutive snapshots",
+  "healthy": {"queries": 1088, "correct": 1088},
+  "two_adjacent_crashes": {"queries": 804, "correct": 804},
+  "restarted": {"queries": 1088, "correct": 1088},
+  "total_queries": 2980,
+  "total_correct": 2980,
+  "race_or_panic_reports": false,
+  "docker_and_netem_exercised": false
+}

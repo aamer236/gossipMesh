@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -59,8 +60,12 @@ func (t *NetworkTransport) StartListener(port int) error {
 		Handler: mux,
 	}
 
+	listener, err := net.Listen("tcp", t.server.Addr)
+	if err != nil {
+		return err
+	}
 	go func() {
-		if err := t.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := t.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("[Transport] Listener failed: %v\n", err)
 		}
 	}()
@@ -111,10 +116,6 @@ func (t *NetworkTransport) SendChordRPC(target string, endpoint string, req inte
 	}
 	defer httpResp.Body.Close()
 
-	if httpResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("rpc error: http status %d", httpResp.StatusCode)
-	}
-
 	respBytes, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return err
@@ -123,6 +124,9 @@ func (t *NetworkTransport) SendChordRPC(target string, endpoint string, req inte
 	atomic.AddUint64(&t.msgsReceived, 1)
 	atomic.AddUint64(&t.bytesReceived, uint64(len(respBytes)))
 
+	if httpResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("rpc error: http status %d", httpResp.StatusCode)
+	}
 	if resp != nil {
 		return json.Unmarshal(respBytes, resp)
 	}
@@ -138,7 +142,9 @@ func (t *NetworkTransport) SendSWIMMessage(target string, message interface{}) e
 // --- Specific RPC Wrappers ---
 
 type FindSuccessorReq struct {
-	ID string `json:"id"`
+	ID   string   `json:"id"`
+	M    int      `json:"m"`
+	Path []string `json:"path,omitempty"`
 }
 
 type FindSuccessorResp struct {
@@ -147,7 +153,11 @@ type FindSuccessorResp struct {
 }
 
 func (t *NetworkTransport) FindSuccessorRPC(target string, id *big.Int) (*NodeRef, int, error) {
-	req := FindSuccessorReq{ID: id.String()}
+	return t.findSuccessorPathRPC(target, id, nil)
+}
+
+func (t *NetworkTransport) findSuccessorPathRPC(target string, id *big.Int, path []string) (*NodeRef, int, error) {
+	req := FindSuccessorReq{ID: id.String(), M: t.node.M, Path: path}
 	var resp FindSuccessorResp
 	err := t.SendChordRPC(target, "/rpc/find_successor", req, &resp)
 	if err != nil {
@@ -159,6 +169,7 @@ func (t *NetworkTransport) FindSuccessorRPC(target string, id *big.Int) (*NodeRe
 type PredAndListResp struct {
 	Predecessor   *NodeRef   `json:"predecessor"`
 	SuccessorList []*NodeRef `json:"successor_list"`
+	M             int        `json:"m"`
 }
 
 func (t *NetworkTransport) GetPredecessorAndListRPC(target string) (*NodeRef, []*NodeRef, error) {
@@ -167,15 +178,19 @@ func (t *NetworkTransport) GetPredecessorAndListRPC(target string) (*NodeRef, []
 	if err != nil {
 		return nil, nil, err
 	}
+	if resp.M != t.node.M {
+		return nil, nil, fmt.Errorf("incompatible identifier space")
+	}
 	return resp.Predecessor, resp.SuccessorList, nil
 }
 
 type NotifyReq struct {
 	Candidate *NodeRef `json:"candidate"`
+	M         int      `json:"m"`
 }
 
 func (t *NetworkTransport) NotifyRPC(target string, candidate *NodeRef) error {
-	req := NotifyReq{Candidate: candidate}
+	req := NotifyReq{Candidate: candidate, M: t.node.M}
 	return t.SendChordRPC(target, "/rpc/notify", req, nil)
 }
 
@@ -183,9 +198,50 @@ func (t *NetworkTransport) PingRPC(target string) error {
 	return t.SendChordRPC(target, "/rpc/ping", nil, nil)
 }
 
+// Overlay counters cover JSON/body payloads, excluding HTTP/TCP headers.
+type countedBody struct {
+	io.ReadCloser
+	count *uint64
+}
+
+func (b *countedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	atomic.AddUint64(b.count, uint64(n))
+	return n, err
+}
+
+type countedResponse struct {
+	http.ResponseWriter
+	transport *NetworkTransport
+	started   bool
+}
+
+func (w *countedResponse) WriteHeader(status int) {
+	if !w.started {
+		w.started = true
+		atomic.AddUint64(&w.transport.msgsSent, 1)
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+func (w *countedResponse) Write(p []byte) (int, error) {
+	if !w.started {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(p)
+	atomic.AddUint64(&w.transport.bytesSent, uint64(n))
+	return n, err
+}
+func (t *NetworkTransport) trackRPC(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
+	if r.Body != nil {
+		r.Body = &countedBody{ReadCloser: r.Body, count: &t.bytesReceived}
+	}
+	return &countedResponse{ResponseWriter: w, transport: t}
+}
+
 // --- HTTP Handlers ---
 
 func (t *NetworkTransport) handleFindSuccessor(w http.ResponseWriter, r *http.Request) {
+	w = t.trackRPC(w, r)
 	atomic.AddUint64(&t.msgsReceived, 1)
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -204,7 +260,11 @@ func (t *NetworkTransport) handleFindSuccessor(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	succ, hops, err := t.node.FindSuccessor(id)
+	if req.M != t.node.M || !validID(id, t.node.M) {
+		http.Error(w, "incompatible space or invalid ID", http.StatusBadRequest)
+		return
+	}
+	succ, hops, err := t.node.findSuccessor(id, req.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -213,10 +273,10 @@ func (t *NetworkTransport) handleFindSuccessor(w http.ResponseWriter, r *http.Re
 	resp := FindSuccessorResp{Node: succ, Hops: hops}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
-	atomic.AddUint64(&t.msgsSent, 1)
 }
 
 func (t *NetworkTransport) handlePredecessorAndList(w http.ResponseWriter, r *http.Request) {
+	w = t.trackRPC(w, r)
 	atomic.AddUint64(&t.msgsReceived, 1)
 	t.node.mu.RLock()
 	pred := t.node.Predecessor
@@ -227,14 +287,15 @@ func (t *NetworkTransport) handlePredecessorAndList(w http.ResponseWriter, r *ht
 	resp := PredAndListResp{
 		Predecessor:   pred,
 		SuccessorList: succList,
+		M:             t.node.M,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
-	atomic.AddUint64(&t.msgsSent, 1)
 }
 
 func (t *NetworkTransport) handleNotify(w http.ResponseWriter, r *http.Request) {
+	w = t.trackRPC(w, r)
 	atomic.AddUint64(&t.msgsReceived, 1)
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -247,17 +308,23 @@ func (t *NetworkTransport) handleNotify(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	t.node.Notify(req.Candidate)
+	if req.M != t.node.M {
+		http.Error(w, "incompatible identifier space", http.StatusBadRequest)
+		return
+	}
+	if err := t.node.Notify(req.Candidate); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
-	atomic.AddUint64(&t.msgsSent, 1)
 }
 
 func (t *NetworkTransport) handlePing(w http.ResponseWriter, r *http.Request) {
+	w = t.trackRPC(w, r)
 	atomic.AddUint64(&t.msgsReceived, 1)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"pong"}`))
-	atomic.AddUint64(&t.msgsSent, 1)
 }
 
 func (t *NetworkTransport) handleLookup(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +347,10 @@ func (t *NetworkTransport) handleLookup(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !validID(keyID, t.node.M) {
+		http.Error(w, "ID outside identifier space", http.StatusBadRequest)
+		return
+	}
 	succ, hops, err := t.node.FindSuccessor(keyID)
 	latMs := float64(time.Since(start).Microseconds()) / 1000.0
 

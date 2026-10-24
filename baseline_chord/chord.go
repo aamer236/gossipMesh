@@ -4,6 +4,8 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"math/big"
+	"math/rand"
+	"sort"
 	"sync"
 )
 
@@ -71,7 +73,7 @@ func HashKey(key string, m int) *big.Int {
 	return id.Mod(id, twoM)
 }
 
-// ChordNode represents a Chord ring participant adhering to the SIGCOMM 2001 paper.
+// ChordNode implements routing and lazy maintenance from SIGCOMM 2001 Sections 4-5.
 type ChordNode struct {
 	mu            sync.RWMutex
 	ID            *big.Int
@@ -82,7 +84,7 @@ type ChordNode struct {
 	Predecessor   *NodeRef
 	SuccessorList []*NodeRef
 	FingerTable   []*NodeRef
-	nextFinger    int
+	singleton     bool
 	transport     *NetworkTransport
 	metrics       *MetricsCollector
 }
@@ -105,7 +107,7 @@ func NewChordNode(id *big.Int, addr string, m, r int, transport *NetworkTranspor
 		Predecessor:   nil,
 		SuccessorList: succList,
 		FingerTable:   fingers,
-		nextFinger:    0,
+		singleton:     true,
 		transport:     transport,
 		metrics:       metrics,
 	}
@@ -120,61 +122,118 @@ func NewChordNode(id *big.Int, addr string, m, r int, transport *NetworkTranspor
 // If the failed node had a very low finger table index, nodes in the successor-list
 // are also available as alternates."
 func (n *ChordNode) FindSuccessor(keyID *big.Int) (*NodeRef, int, error) {
-	n.mu.RLock()
-	succ := n.Successor
-	selfAddr := n.Addr
-	n.mu.RUnlock()
+	return n.findSuccessor(keyID, nil)
+}
 
-	// 1. Single node ring
-	if succ == nil || succ.Addr == selfAddr {
-		return &NodeRef{ID: n.ID, Addr: n.Addr}, 1, nil
+// The path bounds recursive RPCs and rejects cycles in stale routing state.
+// No global membership information participates in routing.
+func (n *ChordNode) findSuccessor(keyID *big.Int, path []string) (*NodeRef, int, error) {
+	if !validID(keyID, n.M) {
+		return nil, 0, fmt.Errorf("key ID outside identifier space")
 	}
-
-	// 2. Base case: keyID is in (n, successor]
-	if InInterval(keyID, n.ID, succ.ID, false, true, n.M) {
-		// Section 5.2: If successor failed, replace with first live entry in successor list
-		if err := n.transport.PingRPC(succ.Addr); err != nil {
-			n.handleSuccessorFailure(succ)
-			n.metrics.LogRepair("lookup_successor_failure_eviction", 0)
-			n.mu.RLock()
-			succ = n.Successor
-			n.mu.RUnlock()
-			if succ.Addr == selfAddr || InInterval(keyID, n.ID, succ.ID, false, true, n.M) {
-				return succ, 1, nil
-			}
-		} else {
+	if len(path) >= 512 {
+		return nil, 0, fmt.Errorf("lookup hop limit exceeded")
+	}
+	for _, addr := range path {
+		if addr == n.Addr {
+			return nil, 0, fmt.Errorf("routing cycle at %s", n.Addr)
+		}
+	}
+	path = append(append([]string(nil), path...), n.Addr)
+	n.mu.RLock()
+	succ, singleton := n.Successor, n.singleton
+	n.mu.RUnlock()
+	if singleton && succ != nil && succ.Addr == n.Addr {
+		return &NodeRef{ID: n.ID, Addr: n.Addr}, 0, nil
+	}
+	if keyID.Cmp(n.ID) == 0 {
+		return &NodeRef{ID: n.ID, Addr: n.Addr}, 0, nil
+	}
+	if succ != nil && succ.Addr == n.Addr {
+		return nil, 0, fmt.Errorf("joining node has not learned a remote successor")
+	}
+	if succ == nil {
+		n.handleSuccessorFailure(nil)
+		n.mu.RLock()
+		succ = n.Successor
+		n.mu.RUnlock()
+	}
+	if succ != nil && InInterval(keyID, n.ID, succ.ID, false, true, n.M) {
+		if err := n.transport.PingRPC(succ.Addr); err == nil {
+			return succ, 1, nil
+		}
+		n.handleSuccessorFailure(succ)
+		n.metrics.LogRepair("lookup_successor_failure_eviction", 0)
+		n.mu.RLock()
+		succ = n.Successor
+		n.mu.RUnlock()
+		if succ != nil && InInterval(keyID, n.ID, succ.ID, false, true, n.M) {
 			return succ, 1, nil
 		}
 	}
-
-	// 3. Greedy routing with Section 5.2 alternate node fallback:
 	candidates := n.ClosestPrecedingCandidates(keyID)
+	n.mu.RLock()
+	// The successor is finger zero; include it even when higher fingers are stale.
+	if n.Successor != nil {
+		candidates = append(candidates, n.Successor)
+	}
+	candidates = append(candidates, n.SuccessorList...)
+	n.mu.RUnlock()
+	seen := map[string]bool{n.Addr: true}
 	for _, candidate := range candidates {
-		res, hops, err := n.transport.FindSuccessorRPC(candidate.Addr, keyID)
-		if err == nil && res != nil {
+		if n.validateRef(candidate) != nil || seen[candidate.Addr] {
+			continue
+		}
+		seen[candidate.Addr] = true
+		res, hops, err := n.transport.findSuccessorPathRPC(candidate.Addr, keyID, path)
+		if err == nil && n.validateRef(res) == nil {
 			return res, hops + 1, nil
 		}
-		// Candidate failed; try next alternate candidate in the list
 		n.metrics.LogRepair("alternate_candidate_fallback", 0)
 	}
+	return nil, 0, fmt.Errorf("no reachable route for key %s from %s", keyID, n.Addr)
+}
 
-	// 4. If all preceding candidates failed, query live successors in the successor-list
-	n.mu.RLock()
-	succList := make([]*NodeRef, len(n.SuccessorList))
-	copy(succList, n.SuccessorList)
-	n.mu.RUnlock()
+func validID(id *big.Int, m int) bool {
+	return id != nil && m > 0 && m <= 160 && id.Sign() >= 0 && id.BitLen() <= m
+}
 
-	for _, s := range succList {
-		if s != nil && s.Addr != "" && s.Addr != n.Addr {
-			res, hops, err := n.transport.FindSuccessorRPC(s.Addr, keyID)
-			if err == nil && res != nil {
-				return res, hops + 1, nil
-			}
+func (n *ChordNode) validateRef(ref *NodeRef) error {
+	if ref == nil || ref.Addr == "" || !validID(ref.ID, n.M) {
+		return fmt.Errorf("invalid node reference")
+	}
+	if ref.ID.Cmp(n.ID) == 0 && ref.Addr != n.Addr {
+		return fmt.Errorf("duplicate node ID %s", ref.ID)
+	}
+	if ref.Addr == n.Addr && ref.ID.Cmp(n.ID) != 0 {
+		return fmt.Errorf("conflicting node address")
+	}
+	return nil
+}
+
+// Called under mu: the paper's finger[1] is this implementation's finger[0].
+func (n *ChordNode) setSuccessorLocked(succ *NodeRef) {
+	n.Successor = succ
+	n.FingerTable[0] = succ
+	if succ != nil && succ.Addr != n.Addr {
+		n.singleton = false
+	}
+}
+
+// Preserve clockwise order, uniqueness and the r-entry bound.
+func (n *ChordNode) successorHints(refs []*NodeRef) []*NodeRef {
+	seen := make(map[string]bool)
+	result := make([]*NodeRef, 0, len(refs))
+	for _, ref := range refs {
+		if n.validateRef(ref) == nil && ref.Addr != n.Addr && !seen[ref.Addr] {
+			seen[ref.Addr] = true
+			result = append(result, ref)
 		}
 	}
-
-	// Fallback to self
-	return &NodeRef{ID: n.ID, Addr: n.Addr}, 1, nil
+	modulus := new(big.Int).Lsh(big.NewInt(1), uint(n.M))
+	distance := func(ref *NodeRef) *big.Int { return new(big.Int).Mod(new(big.Int).Sub(ref.ID, n.ID), modulus) }
+	sort.Slice(result, func(i, j int) bool { return distance(result[i]).Cmp(distance(result[j])) < 0 })
+	return result
 }
 
 // ClosestPrecedingCandidates returns candidate nodes preceding id in descending order of closeness,
@@ -222,89 +281,86 @@ func (n *ChordNode) ClosestPrecedingNode(id *big.Int) *NodeRef {
 // Stabilize periodically verifies immediate successor and notifies it (Figure 7 + Section 5.2).
 func (n *ChordNode) Stabilize() {
 	n.mu.RLock()
-	succ := n.Successor
-	self := &NodeRef{ID: n.ID, Addr: n.Addr}
+	succ, pred := n.Successor, n.Predecessor
 	n.mu.RUnlock()
-
-	if succ == nil || succ.Addr == n.Addr {
-		// Single node ring; if predecessor set, adopt it as successor
+	if succ == nil {
+		n.handleSuccessorFailure(nil)
+		return
+	}
+	if succ.Addr == n.Addr {
+		if pred == nil || pred.Addr == n.Addr || n.validateRef(pred) != nil {
+			return
+		}
+		if n.transport.PingRPC(pred.Addr) != nil {
+			return
+		}
 		n.mu.Lock()
-		if n.Predecessor != nil && n.Predecessor.Addr != n.Addr {
-			n.Successor = n.Predecessor
-			n.SuccessorList = []*NodeRef{n.Predecessor}
+		if n.Successor == succ {
+			n.setSuccessorLocked(pred)
+			n.SuccessorList = []*NodeRef{pred}
 		}
 		n.mu.Unlock()
 		return
 	}
-
-	// Query successor for its predecessor and successor list
-	x, succList, err := n.transport.GetPredecessorAndListRPC(succ.Addr)
+	x, list, err := n.transport.GetPredecessorAndListRPC(succ.Addr)
 	if err != nil {
-		// Section 5.2: Successor failed; replace it with first live entry in successor list
 		n.handleSuccessorFailure(succ)
 		n.metrics.LogRepair("successor_failure_eviction", 0)
 		return
 	}
-
-	// Figure 7: if x in (n, successor) then successor = x
-	if x != nil && x.Addr != "" && x.Addr != n.Addr && InInterval(x.ID, n.ID, succ.ID, false, false, n.M) {
-		n.mu.Lock()
-		n.Successor = x
-		succ = x
-		n.mu.Unlock()
-	}
-
-	// Section 5.2: Update successor list
-	n.mu.Lock()
-	newList := make([]*NodeRef, 0, n.R)
-	newList = append(newList, succ)
-	for _, s := range succList {
-		if s != nil && s.Addr != "" && s.Addr != n.Addr && len(newList) < n.R {
-			duplicate := false
-			for _, existing := range newList {
-				if existing.Addr == s.Addr {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
-				newList = append(newList, s)
-			}
+	chosen := succ
+	if n.validateRef(x) == nil && x.Addr != n.Addr && InInterval(x.ID, n.ID, succ.ID, false, false, n.M) {
+		// Build backups from the chosen successor, not the previous successor.
+		if _, newList, probeErr := n.transport.GetPredecessorAndListRPC(x.Addr); probeErr == nil {
+			chosen = x
+			list = append([]*NodeRef{succ}, newList...)
 		}
 	}
+	refs := append([]*NodeRef{chosen}, list...)
+	hints := n.successorHints(refs)
+	// Keep the selected successor first. Any closer hint is learned on a later
+	// stabilization; backups must lie clockwise beyond the selected successor.
+	newList := []*NodeRef{chosen}
+	for _, ref := range hints {
+		if ref.Addr != chosen.Addr && !InInterval(ref.ID, n.ID, chosen.ID, false, false, n.M) && len(newList) < n.R {
+			newList = append(newList, ref)
+		}
+	}
+	n.mu.Lock()
+	// A lookup may already have repaired this successor while the RPC ran.
+	if n.Successor != succ {
+		n.mu.Unlock()
+		return
+	}
+	n.setSuccessorLocked(chosen)
 	n.SuccessorList = newList
 	n.mu.Unlock()
-
-	// Figure 7: successor.notify(n)
-	_ = n.transport.NotifyRPC(succ.Addr, self)
+	_ = n.transport.NotifyRPC(chosen.Addr, &NodeRef{ID: n.ID, Addr: n.Addr})
 }
 
 // Notify is called when another node candidate believes it is our predecessor (Figure 7).
-func (n *ChordNode) Notify(candidate *NodeRef) {
+func (n *ChordNode) Notify(candidate *NodeRef) error {
+	if err := n.validateRef(candidate); err != nil {
+		return err
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	if candidate == nil || candidate.Addr == n.Addr {
-		return
+	if candidate.Addr == n.Addr {
+		return nil
 	}
-
-	// Figure 7: if (predecessor is nil or candidate in (predecessor, n)) predecessor = candidate
-	if n.Predecessor == nil || n.Predecessor.Addr == n.Addr ||
-		InInterval(candidate.ID, n.Predecessor.ID, n.ID, false, false, n.M) {
+	if n.Predecessor == nil || n.Predecessor.Addr == n.Addr || InInterval(candidate.ID, n.Predecessor.ID, n.ID, false, false, n.M) {
 		n.Predecessor = candidate
 	}
+	return nil
 }
 
-// FixFingers periodically refreshes one entry in the finger table (Figure 7).
+// Figure 7 selects a random non-successor finger. Stabilize owns finger zero.
 func (n *ChordNode) FixFingers() {
-	n.mu.Lock()
-	idx := n.nextFinger
-	n.nextFinger = (n.nextFinger + 1) % n.M
-	nodeID := n.ID
-	n.mu.Unlock()
-
-	start := FingerStart(nodeID, idx, n.M)
-	succ, _, err := n.FindSuccessor(start)
+	if n.M <= 1 {
+		return
+	}
+	idx := 1 + rand.Intn(n.M-1)
+	succ, _, err := n.FindSuccessor(FingerStart(n.ID, idx, n.M))
 	if err == nil && succ != nil {
 		n.mu.Lock()
 		n.FingerTable[idx] = succ
@@ -339,7 +395,8 @@ func (n *ChordNode) Join(bootstrapAddr string) error {
 		// Figure 6 / Singleton initialization
 		self := &NodeRef{ID: n.ID, Addr: n.Addr}
 		n.mu.Lock()
-		n.Successor = self
+		n.setSuccessorLocked(self)
+		n.singleton = true
 		n.Predecessor = nil
 		n.SuccessorList = []*NodeRef{self}
 		for i := range n.FingerTable {
@@ -355,10 +412,16 @@ func (n *ChordNode) Join(bootstrapAddr string) error {
 		return fmt.Errorf("failed to join ring via %s: %w", bootstrapAddr, err)
 	}
 
+	if err := n.validateRef(succ); err != nil {
+		return fmt.Errorf("invalid join successor: %w", err)
+	}
 	n.mu.Lock()
-	n.Successor = succ
+	n.setSuccessorLocked(succ)
+	n.singleton = false
+	for i := 1; i < n.M; i++ {
+		n.FingerTable[i] = nil
+	}
 	n.SuccessorList = []*NodeRef{succ}
-	n.FingerTable[0] = succ
 	n.Predecessor = nil
 	n.mu.Unlock()
 	return nil
@@ -366,32 +429,43 @@ func (n *ChordNode) Join(bootstrapAddr string) error {
 
 // handleSuccessorFailure evicts the dead successor and promotes the next live candidate (Section 5.2).
 func (n *ChordNode) handleSuccessorFailure(failedSucc *NodeRef) {
+	n.mu.RLock()
+	current := n.Successor
+	if current != failedSucc {
+		n.mu.RUnlock()
+		return
+	}
+	refs := append([]*NodeRef(nil), n.SuccessorList...)
+	refs = append(refs, n.FingerTable...)
+	n.mu.RUnlock()
+	candidates := n.successorHints(refs)
+	live := make([]*NodeRef, 0, n.R)
+	for _, ref := range candidates {
+		if failedSucc != nil && ref.Addr == failedSucc.Addr {
+			continue
+		}
+		// Never hold the routing-state lock while waiting for a network timeout.
+		if n.transport.PingRPC(ref.Addr) == nil {
+			live = append(live, ref)
+			if len(live) == n.R {
+				break
+			}
+		}
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	// Filter out failed successor from successor list
-	filtered := make([]*NodeRef, 0, len(n.SuccessorList))
-	for _, s := range n.SuccessorList {
-		if s != nil && s.Addr != failedSucc.Addr && s.Addr != n.Addr {
-			filtered = append(filtered, s)
-		}
+	if n.Successor != current {
+		return
 	}
-	n.SuccessorList = filtered
-
-	// Find the next responsive candidate in the successor list
-	for _, candidate := range n.SuccessorList {
-		if err := n.transport.PingRPC(candidate.Addr); err == nil {
-			n.Successor = candidate
-			n.FingerTable[0] = candidate
-			return
-		}
+	n.SuccessorList = live
+	if len(live) > 0 {
+		n.setSuccessorLocked(live[0])
+	} else {
+		// Loss of contact cannot establish singleton ownership. Preserve other
+		// fingers so maintenance can retry them after a transient failure.
+		n.setSuccessorLocked(nil)
+		n.singleton = false
 	}
-
-	// If no successors left, fall back to self
-	self := &NodeRef{ID: n.ID, Addr: n.Addr}
-	n.Successor = self
-	n.SuccessorList = []*NodeRef{self}
-	n.FingerTable[0] = self
 }
 
 // GetState returns a snapshot of the node's internal state.
@@ -438,6 +512,8 @@ func (n *ChordNode) GetState() map[string]interface{} {
 
 	return map[string]interface{}{
 		"id":             n.ID.String(),
+		"m":              n.M,
+		"r":              n.R,
 		"addr":           n.Addr,
 		"successor":      succMap,
 		"predecessor":    predMap,
