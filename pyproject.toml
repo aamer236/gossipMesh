@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gossipmesh-chord"
+version = "0.1.0"
+description = "Standalone deterministic Chord routing for GossipMesh research"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9,<1", "mypy>=1.14,<3"]
+
+[tool.setuptools.packages.find]
+include = ["chord*", "simulator*", "visualizer*"]
+
+[tool.setuptools.package-data]
+visualizer = ["static/*.html", "static/*.css", "static/*.js"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["chord", "simulator", "experiments", "visualizer"]

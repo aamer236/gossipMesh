@@ -1,4 +1,0 @@
-Phase,Correctness (%),Latency p50 (ms),Latency p95 (ms),Latency p99 (ms),Recovery Time (s)
-Healthy,100.00,1.23,2.09,2.17,N/A
-Gray Failure,100.00,566.53,1012.21,1922.43,N/A
-Post-Crash,100.00,1.28,3.33,3.94,0.51
