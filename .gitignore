@@ -4,4 +4,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 baseline_chord/baseline_chord
+chord_standard_swim/chord_standard_swim
+chord_standard_swim/state/
 *.tar.gz

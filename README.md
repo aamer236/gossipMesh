@@ -1,5 +1,23 @@
 # GossipMesh Benchmarking Suite
 
+## Standard SWIM + GossipMesh
+
+The independent Go variant in [`chord_standard_swim/`](chord_standard_swim/README.md)
+adds full-membership SWIM probing, suspicion/refutation, bounded piggyback gossip,
+and a coordinator that schedules safe Chord repairs. The pure Chord baseline
+below remains unchanged. The optimized finger-scoped variant is still separate
+future work.
+
+```sh
+(cd chord_standard_swim && go build -race -o /tmp/chord-standard-swim .)
+python3 -m orchestrator.standard_swim_verify --binary /tmp/chord-standard-swim --nodes 6
+```
+
+See the [implementation/run guide](chord_standard_swim/README.md) for configuration,
+restart policy, tests and metrics, and the
+[verification report](reports/standard-swim-verification.md) for actual results.
+The baseline Docker runner below does not select the SWIM variant.
+
 ## Directory Layout
 Matches the architecture defined in [gossipmesh_implementation_plan.md](gossipmesh_implementation_plan.md):
 
@@ -11,7 +29,7 @@ Matches the architecture defined in [gossipmesh_implementation_plan.md](gossipme
 │   ├── network.go            # RPC and HTTP overlay listener
 │   ├── metrics.go            # Logging and telemetry
 │   └── chord_test.go         # Unit tests
-├── chord_standard_swim/     # Case 2: Chord + Global SWIM (Folder prepared)
+├── chord_standard_swim/     # Case 2: Chord + full-membership SWIM + GossipMesh
 ├── chord_optimized_swim/    # Case 3: Chord + Scoped SWIM (Folder prepared)
 ├── orchestrator/            # Central Python runner & Docker Compose
 │   ├── runner.py             # Cluster management & fault injection
