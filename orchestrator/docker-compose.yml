@@ -1,0 +1,173 @@
+services:
+  node0:
+    build:
+      context: ../baseline_chord
+      dockerfile: Dockerfile
+    image: baseline-chord:latest
+    container_name: baseline-node-0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-0:8000
+      - BOOTSTRAP_ADDR=
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8000:8000"
+    networks:
+      - chord-net
+
+  node1:
+    image: baseline-chord:latest
+    container_name: baseline-node-1
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-1:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8001:8000"
+    networks:
+      - chord-net
+
+  node2:
+    image: baseline-chord:latest
+    container_name: baseline-node-2
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-2:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8002:8000"
+    networks:
+      - chord-net
+
+  node3:
+    image: baseline-chord:latest
+    container_name: baseline-node-3
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-3:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8003:8000"
+    networks:
+      - chord-net
+
+  node4:
+    image: baseline-chord:latest
+    container_name: baseline-node-4
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-4:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8004:8000"
+    networks:
+      - chord-net
+
+  node5:
+    image: baseline-chord:latest
+    container_name: baseline-node-5
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-5:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8005:8000"
+    networks:
+      - chord-net
+
+  node6:
+    image: baseline-chord:latest
+    container_name: baseline-node-6
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-6:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8006:8000"
+    networks:
+      - chord-net
+
+  node7:
+    image: baseline-chord:latest
+    container_name: baseline-node-7
+    depends_on:
+      - node0
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PORT=8000
+      - ADVERTISE_ADDR=baseline-node-7:8000
+      - BOOTSTRAP_ADDR=baseline-node-0:8000
+      - M=160
+      - R=4
+      - STABILIZE_INTERVAL_MS=150
+      - FIX_FINGERS_INTERVAL_MS=100
+      - CHECK_PRED_INTERVAL_MS=200
+    ports:
+      - "8007:8000"
+    networks:
+      - chord-net
+
+networks:
+  chord-net:
+    driver: bridge
