@@ -1,7 +1,6 @@
-.venv/
 __pycache__/
 *.py[cod]
-.mypy_cache/
+.venv/
 .ruff_cache/
-baseline_chord/baseline_chord
-*.tar.gz
+.mypy_cache/
+*.egg-info/

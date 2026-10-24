@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c1118">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%2376e0bd' stroke-width='3'/%3E%3C/svg%3E">
+  <title>GossipMesh · Chord Lab</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="GossipMesh home"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="10"/><circle cx="16" cy="6" r="3"/><circle cx="24.7" cy="21" r="3"/><circle cx="7.3" cy="21" r="3"/></svg>gossip<span>mesh</span></a>
+    <span class="top-divider"></span><span class="lab-name">CHORD LAB</span>
+    <span class="local-badge"><span class="status-dot"></span>Local simulation</span>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">DISTRIBUTED SYSTEMS / INTERACTIVE EXPLORER</p><h1>Watch the ring recover<span>.</span></h1><p class="subtitle">32 peers. One ring. Crash a node and follow Chord as it repairs its routes.</p></div>
+      <button id="reset" class="button subtle"><span aria-hidden="true">↺</span> Reset ring</button>
+    </section>
+
+    <div id="connection-error" role="alert" hidden></div>
+
+    <section class="metrics" aria-label="Live simulation metrics">
+      <div class="metric"><span class="metric-label">NODES ONLINE</span><div><strong id="online">—</strong><span class="metric-unit">/ 32</span><span id="offline-label" class="metric-note">Connecting</span></div></div>
+      <div class="metric"><span class="metric-label">MAINTENANCE TICK</span><div><strong id="tick">—</strong><span id="run-label" class="metric-note">Periodic checks</span></div></div>
+      <div class="metric"><span class="metric-label">STALE FINGER ENTRIES</span><div><strong id="stale">—</strong><span id="accuracy" class="metric-note">—</span></div></div>
+      <div class="metric"><span class="metric-label">ROUTING UPDATES</span><div><strong id="repairs">—</strong><span class="metric-note">Since reset</span></div></div>
+    </section>
+
+    <div class="workspace">
+      <section class="panel topology-panel" aria-labelledby="topology-heading">
+        <div class="panel-heading"><div><span class="eyebrow">01 / NETWORK TOPOLOGY</span><h2 id="topology-heading">The Chord ring</h2></div><span id="ring-status" class="badge">Connecting</span></div>
+        <div class="graph-scroll">
+          <div class="graph-scene" id="graph-scene">
+            <svg id="ring" viewBox="0 0 760 680" aria-label="Chord ring connections" role="img">
+              <defs><marker id="arrow-mint" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#76e0bd"/></marker><marker id="arrow-violet" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#a89af8"/></marker><marker id="arrow-red" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#f28c8c"/></marker></defs>
+              <circle class="ring-guide outer" cx="380" cy="340" r="290"/>
+              <circle class="ring-guide" cx="380" cy="340" r="258"/>
+              <circle class="ring-guide inner" cx="380" cy="340" r="210"/>
+              <g id="tick-marks"></g><g id="successor-edges"></g><g id="finger-edges"></g>
+              <text x="380" y="24" class="ring-axis">0 / 256</text><text x="700" y="344" class="ring-axis">64</text><text x="380" y="662" class="ring-axis">128</text><text x="60" y="344" class="ring-axis">192</text>
+            </svg>
+            <div class="ring-center"><span class="center-label">LIVE PEERS</span><div><strong id="center-online">32</strong><span>/32</span></div><p id="center-status">Connecting to the ring</p><span class="clockwise">Clockwise ownership ↻</span></div>
+            <div id="nodes" aria-label="Chord nodes"></div>
+          </div>
+        </div>
+        <div class="graph-footer"><div class="legend"><span><i class="legend-dot mint"></i>Online</span><span><i class="legend-dot red"></i>Crashed</span><span><i class="legend-line"></i>Finger route</span></div><div class="edge-options"><label><input id="show-fingers" type="checkbox" checked> Fingers</label><label><input id="show-successors" type="checkbox" checked> Successors</label></div></div>
+        <div class="interaction-hint"><span aria-hidden="true">⌁</span><span><b>Hover</b> to preview · <b>Click</b> to pin · <b>Right-click</b> to crash a node</span></div>
+      </section>
+
+      <aside class="panel inspector" aria-labelledby="inspector-heading">
+        <div class="panel-heading"><div><span class="eyebrow">02 / NODE INSPECTOR</span><h2 id="inspector-heading">Node <span id="selected-id">000</span></h2></div><span id="pin-label" class="badge muted">Pinned</span></div>
+        <div class="inspector-body">
+          <div class="node-summary"><span id="node-status" class="badge">Online</span><span id="node-identity" class="mono">8-bit ID · 0x00</span></div>
+          <div class="neighbors"><div><span>PREDECESSOR</span><strong id="predecessor">—</strong></div><div><span>SUCCESSOR</span><strong id="successor">—</strong></div></div>
+          <div class="table-title"><h3>Finger table</h3><span id="finger-count" class="muted-text">8 entries</span></div>
+          <table aria-label="Selected node finger table"><thead><tr><th>i</th><th>Start</th><th>Routes to</th><th>Status</th></tr></thead><tbody id="finger-table"></tbody></table>
+          <p class="formula mono">startᵢ = (node + 2ⁱ) mod 256</p>
+          <div class="table-title"><h3>Successor list</h3><span class="muted-text">Failover order</span></div><div id="successor-list" class="successor-list"></div>
+          <div class="last-check"><div><span class="status-dot"></span><h3>Periodic checks</h3><span id="last-check-tick" class="mono">Waiting</span></div><p id="check-detail">Checks begin on the next maintenance tick.</p><div class="check-tags"><span>Predecessor probe</span><span>Stabilize</span><span>Fix finger</span></div></div>
+          <button id="node-action" class="button danger">Crash node 000</button><p class="crash-note" id="crash-note">Peers repair their own tables on subsequent ticks.</p>
+        </div>
+      </aside>
+    </div>
+
+    <section class="maintenance-bar panel" aria-label="Maintenance controls">
+      <div class="maintenance-title"><span class="live-indicator" id="live-indicator"></span><div><h3>Periodic maintenance</h3><p id="maintenance-description">Each live node checks its predecessor, stabilizes, and repairs one finger per tick.</p></div></div>
+      <div class="maintenance-controls"><label for="speed">Tick interval</label><select id="speed"><option value="2">2 seconds</option><option value="1" selected>1 second</option><option value="0.5">0.5 seconds</option></select><button id="step" class="button subtle">Step tick <span aria-hidden="true">→</span></button><button id="pause" class="button primary">Pause <span aria-hidden="true">Ⅱ</span></button></div>
+    </section>
+
+    <section class="panel activity" aria-labelledby="activity-heading"><div class="panel-heading"><div><span class="eyebrow">03 / PROTOCOL ACTIVITY</span><h2 id="activity-heading">Inside the network</h2></div><span id="checks-count" class="mono muted-text">0 operations</span></div><div id="event-log" class="event-log" role="log" aria-live="off"><p class="empty">Waiting for the simulation…</p></div></section>
+    <footer><span>GossipMesh / Chord research prototype</span><span>Actual Python Chord nodes · No SWIM · No simulated data storage</span></footer>
+  </main>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
