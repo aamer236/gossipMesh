@@ -14,12 +14,121 @@ python3 -m unittest discover -v
 python3 -m experiments.scaling --sizes 16 64 128 --queries 1000
 ```
 
+For the complete deterministic, one-process milestone:
+
+```sh
+python3 -m simulator
+python3 -m experiments.standalone --sizes 16 32 64 128 --seeds 7 42 20261024 \
+  --m 16 --queries 500 --rpc-latency 1 --timeout 5 --period 1 --failures 2 \
+  --output reports/standalone-results.json
+```
+
+The demo joins 32 nodes, routes a key, crashes node 8, observes an explicit failure,
+repairs surviving routes and restores the endpoint. It uses no sockets, threads
+or sleeps. See the [paper audit](reports/chord-paper-audit.md) and
+[verification report](reports/standalone-verification.md) for algorithm scope,
+results and limits. Section 5 lazy maintenance is implemented; Section 4 eager
+`init_finger_table`/`update_others` remains a separate future strategy.
+
+## Deterministic simulation and measurement
+
+`simulator.ChordSimulation(m=16, seed=0, latency=0, timeout=5, drop_rate=0)` owns
+external orchestration, virtual time and delivery. APIs: `add_node(id, bootstrap=None)`,
+`run_rounds(count, period=1)`, `converge(max_rounds=1000, period=1)`, `crash(id)`,
+`recover(id)`, `leave(id)`, `rejoin(id, bootstrap)`, `diagnostics()` and `trace()`.
+
+```python
+from simulator import ChordSimulation
+
+simulation = ChordSimulation(m=8, seed=7, latency=1)
+for identifier in range(0, 256, 8):
+    simulation.add_node(identifier)
+simulation.converge()
+simulation.clock.call_later(1, lambda: simulation.crash(8))
+simulation.run_rounds(1)
+simulation.converge()
+assert simulation.nodes[0].find_successor(8).id == 16
+```
+
+`clock.call_at(when, callback)` and `call_later(delay, callback)` order scheduled
+actions by virtual deadline, breaking ties FIFO. Cancellation and finite event
+budgets are supported. Transport controls: `set_link(source,target,bool)`,
+`set_latency(source,target,cost)`, `drop_next(source,target,count=1)` and
+`set_drop_rate(probability)`. Drops use a private seeded generator; a dropped
+request never executes its handler.
+
+The synchronous core stays serialized: RPCs consume configured virtual service
+costs and dropped requests consume timeout costs. Nested probes add their cost.
+Unavailable endpoints fail at the normal service cost. Scheduled callbacks never
+interrupt a handler; overdue callbacks run afterward in deadline order. These
+are **virtual service units**, not milliseconds or a model of overlapping,
+reordered packet delivery. Maintenance does not run concurrently during a lookup.
+
+The richer benchmark records all query samples, explicit failures separately from
+incorrect owners, mean/median/p95/p99 hops and virtual latency, RPCs per attempt,
+separate join/convergence costs, incorrect-finger traces, maintenance overhead,
+adjacent-failure recovery and restoration. Percentiles use nearest rank. Hops
+cover correct lookups; latency/RPC distributions cover all attempts, with successful
+latency also separate. Empty distributions are null, not fabricated zeros.
+
+Healthy measurements exclude initialization/maintenance. Recovery includes 16
+probes per round (or fewer when queries < 16); total time, probe cost, maintenance
+RPCs and recovery time excluding probe work are reported separately. Global
+diagnostics only observe membership; they never supply routes or modify state.
+Raw baseline: `reports/standalone-results.json`, 12 cases and 6,000 healthy queries.
+
+To measure Python allocations separately:
+
+```sh
+python3 -m experiments.standalone --sizes 16 32 64 --seeds 20261024 --m 16 \
+  --queries 50 --failures 0 --trace-memory \
+  --output reports/standalone-memory-results.json
+```
+
+Memory fields distinguish exported routing-snapshot sizes/pointer slots from
+tracemalloc allocations for the whole case (including diagnostics and samples).
+They do not measure process RSS or only the persistent Chord node heap. Bytes
+vary by runtime; memory observations are not protocol determinism assertions.
+No storage layer is included in this routing milestone.
+
+## Visual simulator
+
+```sh
+python3 -m visualizer --port 8765
+```
+
+Open **http://127.0.0.1:8765**. The local dashboard runs 32 actual Chord nodes
+at IDs 0, 8, …, 248 in an 8-bit identifier space. It starts with converged tables.
+
+- Hover over a node to preview its eight finger entries, predecessor, successor,
+  and successor list. Click to pin its inspector and finger connections.
+- Right-click a node to crash its simulated endpoint. An inspector button offers
+  the same action for touch/keyboard users. Offline nodes remain visible with
+  frozen state; live nodes retain stale pointers until maintenance repairs them.
+- Every second, each live node runs `check_predecessor`, `stabilize`, and one
+  rotating `fix_fingers` operation through `maintain()`. The activity feed shows
+  neighbor changes, finger updates, and per-tick errors.
+- Pause/Resume, step one tick while paused, change the interval (0.5/1/2 seconds),
+  restore an endpoint, or reset all 32 nodes. Reset resumes the default schedule.
+- Hover/focus a finger row to highlight its edge. Toggle fingers/successor edges
+  independently. On narrow screens the ring scrolls horizontally rather than
+  shrinking nodes into overlapping targets.
+
+This is a single shared, in-memory simulation across tabs. The single-threaded
+HTTP server serializes actions and maintenance and keeps running when the browser
+is closed. Restarting/resetting loses session state. Bind address is loopback only;
+this is a local demonstration server, not a hosted multi-user application.
+The global observer computes correctness/stale-entry diagnostics but never
+injects routes. Crash does not broadcast failure or invoke targeted repair.
+The Chord core is unchanged. Large failures can exhaust local routes; the UI
+reports incomplete recovery rather than replacing tables from global membership.
+
 No installation is required. To install as a package, use `pip install .`.
 Development tools are optional: `pip install -e '.[dev]'`.
 
 ```sh
-.venv/bin/ruff format --check chord tests experiments
-.venv/bin/ruff check chord tests experiments
+.venv/bin/ruff format --check chord simulator tests experiments visualizer
+.venv/bin/ruff check chord simulator tests experiments visualizer
 .venv/bin/mypy
 ```
 
@@ -90,6 +199,11 @@ list/finger hint. Stabilization then discovers closer neighbors. No reachable
 hint means explicit failure, including a lone survivor of a former two-node ring.
 `leave()` stops participation; neighbors use ordinary failure recovery. It does
 not atomically splice neighbors or transfer application data.
+In particular, a two-node survivor cannot infer singleton ownership after crash
+or withdrawal. Restore an endpoint or explicitly rebootstrap; this is not an
+atomic graceful-leave protocol. Failed finger repair retains its old entry but
+advances the cursor to avoid starving other fingers. New join clears old lifecycle
+hints and resets the cursor; hint version ordering applies within each lifecycle.
 
 `InMemoryTransport.set_available(peer, bool)` simulates a crash/recovery while
 preserving node state. `set_link(source, target, bool)` controls directed links.

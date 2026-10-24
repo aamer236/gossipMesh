@@ -144,6 +144,7 @@ class ChordNode:
         self._blocked.clear()
         self._hint_versions.clear()
         self._active = self._singleton = True
+        self._next_finger = 0
         self._fingers = [self.peer] * self.space.m
         self._set_predecessor(self.peer)
         self._set_successors([self.peer])
@@ -156,12 +157,15 @@ class ChordNode:
         self._validate_peer(existing_node)
         if existing_node == self.peer:
             raise InvalidState("use create() to create a new ring")
+        # Joining starts a fresh lifecycle. Old detector hints must not veto an
+        # explicitly supplied, reachable bootstrap after a local leave.
+        self._blocked.clear()
+        self._hint_versions.clear()
         result = self._lookup(self.peer.id, existing_node, self._max_hops)
         if result.owner.id == self.peer.id:
             raise InvalidState("node ID already belongs to another node")
-        self._blocked.clear()
-        self._hint_versions.clear()
         self._singleton = False
+        self._next_finger = 0
         self._fingers = [None] * self.space.m
         self._set_predecessor(None)
         self._set_successors([result.owner])
@@ -341,6 +345,9 @@ class ChordNode:
         self._require_active()
         selected = self._next_finger if index is None else index
         start = self.space.finger_start(self.peer.id, selected)
+        # Fairness across failed requests: retain the old entry on failure, but
+        # do not let one unreachable region starve every other finger.
+        self._next_finger = (selected + 1) % self.space.m
         owner = self.find_successor(start)
         if selected == 0:
             tails = [
@@ -353,7 +360,6 @@ class ChordNode:
             self._set_successors([owner, *tails])
         else:
             self._fingers[selected] = owner
-        self._next_finger = (selected + 1) % self.space.m
         self._emit(EventKind.FINGER_REPAIRED, owner, index=selected)
 
     def maintain(self) -> MaintenanceResult:

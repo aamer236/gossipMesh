@@ -13,7 +13,10 @@ dependencies = []
 dev = ["ruff>=0.9,<1", "mypy>=1.14,<3"]
 
 [tool.setuptools.packages.find]
-include = ["chord*"]
+include = ["chord*", "simulator*", "visualizer*"]
+
+[tool.setuptools.package-data]
+visualizer = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.ruff]
 line-length = 88
@@ -25,4 +28,4 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["chord"]
+files = ["chord", "simulator", "experiments", "visualizer"]

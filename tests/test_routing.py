@@ -144,3 +144,19 @@ class RoutingTests(unittest.TestCase):
         source.notify(nodes[1].peer)
         self.assertEqual(source.state.predecessor, newcomer.peer)
         converge([*nodes, newcomer])
+
+    def test_correct_successor_backbone_routes_with_live_stale_fingers(self):
+        nodes, transport = make_ring([0, 4, 8, 12])
+        converge(nodes)
+        newcomer = ChordNode(Peer(6, "newcomer"), nodes[0].space, transport)
+        transport.register(newcomer)
+        newcomer.join(nodes[0].peer)
+        nodes.append(newcomer)
+        # Repair only the successor backbone; intentionally leave higher fingers stale.
+        for _ in range(16):
+            for node in nodes:
+                node.check_predecessor()
+                node.stabilize()
+        self.assertTrue(consistent(nodes, fingers=False))
+        self.assertFalse(consistent(nodes))
+        self.assert_all_lookups(nodes)

@@ -1,5 +1,6 @@
 import random
 import unittest
+from unittest.mock import patch
 
 from chord import (
     ChordNode,
@@ -15,6 +16,28 @@ from tests.support import consistent, converge, expected_owner, make_ring
 
 
 class FailureTests(unittest.TestCase):
+    def test_finger_rotation_advances_after_lookup_failure(self):
+        node = self.nodes[0]
+        before = node.state
+        with patch.object(
+            node, "find_successor", side_effect=LookupFailed("dropped")
+        ) as lookup:
+            for _ in range(node.space.m):
+                with self.assertRaises(LookupFailed):
+                    node.fix_fingers()
+        starts = [call.args[0] for call in lookup.call_args_list]
+        self.assertEqual(len(set(starts)), node.space.m)
+        self.assertEqual(node.state, before)
+
+    def test_explicit_rejoin_discards_previous_lifecycle_hints(self):
+        node, bootstrap = self.nodes[:2]
+        node.set_peer_available(bootstrap.peer, False, version=100)
+        node.leave()
+        converge([other for other in self.nodes if other != node])
+        node.join(bootstrap.peer)
+        converge(self.nodes)
+        self.assert_ownership(self.nodes)
+
     def setUp(self):
         self.nodes, self.transport = make_ring(list(range(0, 32, 4)), m=5)
         converge(self.nodes)
@@ -149,6 +172,14 @@ class FailureTests(unittest.TestCase):
         transport.set_available(nodes[1].peer, True)
         converge(nodes)
         self.assertEqual(nodes[0].find_successor(3), nodes[1].peer)
+
+    def test_two_node_local_withdrawal_has_no_atomic_graceful_handoff(self):
+        nodes, _ = make_ring([1, 9])
+        converge(nodes)
+        nodes[1].leave()
+        self.assertTrue(nodes[0].maintain().errors)
+        with self.assertRaises(LookupFailed):
+            nodes[0].find_successor(3)
 
     def test_finger_fallback_when_successor_list_exhausted(self):
         nodes, transport = make_ring(list(range(0, 32, 4)), m=5, list_size=1)

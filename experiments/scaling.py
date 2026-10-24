@@ -31,7 +31,7 @@ def run_experiment(
     join_order = sorted(identifiers)
     rng.shuffle(join_order)
     transport = InMemoryTransport(space)
-    nodes = []
+    nodes: list[ChordNode] = []
     for identifier in join_order:
         node = ChordNode(Peer(identifier, f"node-{identifier}"), space, transport)
         transport.register(node)
@@ -80,6 +80,11 @@ def run_experiment(
         else:
             hops.append(result.hops)
     sorted_hops = sorted(hops)
+    correct_fingers = sum(
+        finger.peer == owner(finger.start)
+        for node in nodes
+        for finger in node.state.fingers
+    )
     return {
         "nodes": count,
         "m": m,
@@ -88,7 +93,7 @@ def run_experiment(
         "convergence_ticks": ticks,
         "stabilization_operations": ticks * count,
         "finger_repair_attempts": ticks * count,
-        "finger_correctness": 1.0,
+        "finger_correctness": correct_fingers / (count * m),
         "success_rate": len(hops) / queries,
         "failed_lookups": failures,
         "incorrect_owners": incorrect,
