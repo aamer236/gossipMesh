@@ -16,6 +16,7 @@ import (
 
 // NetworkTransport handles incoming and outgoing HTTP-based RPCs for Chord.
 type NetworkTransport struct {
+	store         *KeyStore
 	client        *http.Client
 	ctx           context.Context
 	swim          *SWIM
@@ -37,6 +38,7 @@ type NetworkTransport struct {
 
 func NewNetworkTransport(timeout time.Duration, metrics *MetricsCollector) *NetworkTransport {
 	return &NetworkTransport{
+		store: &KeyStore{values: make(map[string]string)},
 		client: &http.Client{
 			Timeout: timeout,
 		},
@@ -52,6 +54,9 @@ func (t *NetworkTransport) SetNode(node *ChordNode) {
 func (t *NetworkTransport) StartListener(port int) error {
 	t.port = port
 	mux := http.NewServeMux()
+	mux.HandleFunc("/kv", t.handleStorage)
+	mux.HandleFunc("/kv/local", t.handleLocalStorage)
+	mux.HandleFunc("/rpc/kv", t.handleStorageRPC)
 
 	if t.swim != nil {
 		mux.Handle("/swim/rpc", t.swim)

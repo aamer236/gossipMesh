@@ -8,11 +8,15 @@ import datetime as dt
 import hashlib
 import json
 import math
+import random
+import secrets
 import socket
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
+import urllib.error
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +27,7 @@ from orchestrator.runner import get_json, ring_converged
 KEYS = ("chord", "swim")
 LABELS = {"chord": "Plain Chord", "swim": "Chord + SWIM"}
 PROFILES = {"balanced": (1000, 500, 1000), "fast": (200, 100, 300), "slow": (5000, 2000, 5000)}
-EVENT_TYPES = {"peer_suspected", "peer_refuted", "peer_dead", "peer_rejoined", "peer_added", "finger_dirty", "finger_repaired", "successor_repair_validated", "predecessor_cleared", "repair_completed", "repair_pending", "maintenance_fast", "maintenance_backoff", "error"}
+EVENT_TYPES = {"peer_suspected", "peer_refuted", "peer_dead", "peer_rejoined", "peer_added", "finger_dirty", "finger_repaired", "successor_repair_validated", "predecessor_cleared", "repair_completed", "repair_pending", "membership_event_handled", "references_identified", "successor_list_refreshed", "maintenance_fast", "maintenance_backoff", "error"}
 
 
 def configuration(data):
@@ -79,7 +83,12 @@ class Experiment:
         self.event_seq = 0
         self.faults = []
         self.fault_seq = 0
+        self.storage_operations = deque(maxlen=40)
+        self.seed = secrets.randbits(32)
+        self.seed_records = []
+        self.seed_complete = False
         self.read_offsets = {}
+        self.log_lock = threading.Lock()
         self.last_traffic = {}
         self.last_tick = None
         self.last_snapshot = {key: {"nodes": [], "summary": {}, "series": []} for key in KEYS}
@@ -97,7 +106,17 @@ class Experiment:
     def _event(self, kind, variant=None, node=None, detail="", observed_time=None):
         with self.lock:
             self.event_seq += 1
-            self.events.append({"id": self.event_seq, "t": self.elapsed(), "type": kind, "variant": variant, "node": node, "detail": detail, "observed_time": observed_time})
+            record = {"id": self.event_seq, "t": self.elapsed(), "type": kind, "variant": variant, "node": node, "detail": detail, "observed_time": observed_time}
+            self.events.append(record)
+            if variant == "swim" and node is not None:
+                for fault in reversed(self.faults):
+                    if fault["type"] == "crash" and str(fault["node"]) == str(node):
+                        # Only the current crash episode collects evidence. A restart
+                        # or any later action ends the previous episode.
+                        if not fault.get("evidence_closed"):
+                            fault.setdefault("evidence", []).append(copy.deepcopy(record))
+                            fault["evidence"] = fault["evidence"][-256:]
+                        break
 
     def _args(self):
         stabilize, fix, predecessor = PROFILES[self.config["profile"]]
@@ -156,13 +175,21 @@ class Experiment:
                 self._observe()
                 with self.lock:
                     if self.status == "starting" and all(self.last_snapshot[k]["summary"].get("converged") for k in KEYS):
-                        self.status = "running"
-                        self.generation += 1
-                        self._event("ready", detail="Both rings converged; matched lookup workload started")
-                        self.workload_thread = threading.Thread(target=self._workload, name="dashboard-workload", daemon=True)
-                        self.workload_thread.start()
+                        self.status = "seeding"
                     if self.status == "starting" and time.monotonic() > startup_deadline:
                         raise RuntimeError("Ring convergence not observed within 300 s; no lookup workload was started")
+                if self.status == "seeding":
+                    self._seed_storage()
+                    if self.cancel.is_set():
+                        break
+                    self._observe()
+                    with self.lock:
+                        self.seed_complete = True
+                        self.status = "running"
+                        self.generation += 1
+                        self._event("ready", detail="Both rings converged and shared random records stored; lookup workload started")
+                        self.workload_thread = threading.Thread(target=self._workload, name="dashboard-workload", daemon=True)
+                        self.workload_thread.start()
                 self.cancel.wait(max(0, 1 - (time.monotonic() - began)))
         except Exception as error:
             with self.lock:
@@ -243,6 +270,10 @@ class Experiment:
             self.totals[variant]["overloads"] += bool(sample.get("harness_overload"))
 
     def _logs(self):
+        with self.log_lock:
+            self._read_logs()
+
+    def _read_logs(self):
         for key, nodes in self.rings.items():
             for node in nodes:
                 path = node["log_path"]
@@ -251,7 +282,11 @@ class Experiment:
                 with path.open() as handle:
                     handle.seek(self.read_offsets.get(str(path), 0))
                     for _ in range(1500):
+                        line_start = handle.tell()
                         line = handle.readline()
+                        if line and not line.endswith("\n"):
+                            handle.seek(line_start)
+                            break
                         if not line:
                             break
                         try:
@@ -277,11 +312,12 @@ class Experiment:
                 alive = node in live
                 state = get_json(f"http://127.0.0.1:{node['port']}/state", timeout=.3) if alive else None
                 metrics = get_json(f"http://127.0.0.1:{node['port']}/metrics", timeout=.3) if alive else None
+                stored = get_json(f"http://127.0.0.1:{node['port']}/kv/local", timeout=.5) if alive else None
                 membership = get_json(f"http://127.0.0.1:{node['port']}/membership", timeout=.3) if alive and key == "swim" else None
                 if alive and node["process"].poll() is not None:
                     self._event("process_exit", key, node["id"], "Process exited unexpectedly")
                 node["ready"] = bool(state)
-                observed.append({"id": node["id"], "alive": alive, "reachable": bool(state), "delay_ms": node["delay_ms"], "addr": node["addr"], "state": state, "maintenance": (metrics or {}).get("maintenance"), "membership": membership or [], "metrics": metrics})
+                observed.append({"id": node["id"], "alive": alive, "reachable": bool(state), "delay_ms": node["delay_ms"], "addr": node["addr"], "state": state, "storage": stored, "maintenance": (metrics or {}).get("maintenance"), "membership": membership or [], "metrics": metrics})
             now = self.elapsed()
             live_identities = {(n["id"], n["addr"]) for n in live}
             states = [n["state"] for n in observed if n["alive"]]
@@ -319,6 +355,7 @@ class Experiment:
         if type(delay_ms) is not int or not 0 <= delay_ms <= 500:
             raise ValueError("Delay must be from 0 to 500 ms")
         with self.control:
+            self._logs()
             with self.lock:
                 if self.status != "running":
                     raise ValueError("Wait for both rings to become ready")
@@ -334,11 +371,13 @@ class Experiment:
                     raise ValueError("Delay applies to a running process")
                 self.generation += 1
                 at = self.elapsed()
+                for prior in self.faults:
+                    prior["evidence_closed"] = True
                 for fault in self.faults:
                     if fault.get("measure_recovery") and any(r["seconds"] is None for r in fault["recovery"].values()):
                         fault["interrupted"] = True
                 self.fault_seq += 1
-                fault = {"measure_recovery": action in ("crash", "restart"), "id": self.fault_seq, "type": action, "node": ident, "t": at, "recovery": {key: {"seconds": None, "consecutive": 0} for key in KEYS}, "interrupted": False}
+                fault = {"measure_recovery": action in ("crash", "restart"), "id": self.fault_seq, "type": action, "node": ident, "t": at, "recovery": {key: {"seconds": None, "consecutive": 0} for key in KEYS}, "interrupted": False, "evidence": [], "before": {key: [{"id": n["id"], "state": copy.deepcopy(n["state"])} for n in self.last_snapshot[key]["nodes"] if n["alive"] and n["state"]] for key in KEYS}}
                 self.faults.append(fault)
                 self.faults = self.faults[-40:]
                 if action == "crash":
@@ -365,9 +404,59 @@ class Experiment:
                     node["process"].wait(timeout=2)
         return fault
 
+    def _seed_storage(self):
+        chosen = random.Random(self.seed).sample(range(256), min(128, max(16, 2*self.config["nodes"])))
+        for index, key in enumerate(chosen):
+            if self.cancel.is_set():
+                return
+            record = self.storage({"operation":"put", "key":key, "value":f"demo-{self.seed}-{key}", "initiator":self.node_ids[index % len(self.node_ids)]}, initializing=True)
+            with self.lock:
+                self.seed_records.append(copy.deepcopy(record))
+            if any(r.get("http_status") != 200 or not r.get("found") for r in record["results"].values()):
+                raise RuntimeError(f"Initial paired storage failed for key {key}; inspect exported seed records")
+        self._event("storage_seed_complete", detail={"seed":self.seed,"records":len(chosen)})
+
+    def storage(self, data, initializing=False):
+        if not isinstance(data, dict) or set(data) - {"operation", "key", "value", "initiator"}:
+            raise ValueError("Invalid storage operation")
+        op, key = data.get("operation"), data.get("key")
+        if op not in ("put", "get") or type(key) is not int or not 0 <= key < 256:
+            raise ValueError("Choose put/get and an integer key from 0 to 255")
+        value = data.get("value", "")
+        if not isinstance(value, str) or len(value.encode()) > 65536:
+            raise ValueError("Value must be a string of at most 64 KiB")
+        with self.control:
+            with self.lock:
+                if self.status != "running" and not (initializing and self.status == "seeding"):
+                    raise ValueError("Wait for convergence and initial storage to finish")
+                ident = data.get("initiator", self.node_ids[0])
+                if type(ident) is not int:
+                    raise ValueError("Invalid initiating node")
+                peers = {k: next((n for n in self._live(k) if n["id"] == ident), None) for k in KEYS}
+                if not all(peers.values()):
+                    raise ValueError("Choose an initiating node alive in both rings")
+                record = {"t": self.elapsed(), "operation": op, "key": key, "initiator": ident, "sent_value": value if op == "put" else None, "results": {}}
+            # Paired commands use the exact same key/value, never observer-supplied owners.
+            for variant, peer in peers.items():
+                payload = json.dumps({"value": value}).encode() if op == "put" else None
+                request = urllib.request.Request(f"http://127.0.0.1:{peer['port']}/kv?id={key}", data=payload, method="PUT" if op == "put" else "GET", headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        result = {"http_status": response.status, **json.load(response)}
+                except urllib.error.HTTPError as error:
+                    with error:
+                        result = {"http_status": error.code, **json.load(error)}
+                except (OSError, ValueError) as error:
+                    result = {"error": str(error)}
+                record["results"][variant] = result
+            with self.lock:
+                self.storage_operations.append(record)
+                self._event("storage_"+op, node=ident, detail={"key": key, "results": record["results"]})
+        return record
+
     def snapshot(self, export=False):
         with self.lock:
-            result = {"status": self.status, "error": self.error, "config": self.config, "elapsed": self.elapsed(), "node_ids": self.node_ids, "variants": copy.deepcopy(self.last_snapshot), "events": list(self.events), "faults": copy.deepcopy(self.faults), "generation": self.generation, "provenance": {"binary_sha256": self.hashes, "protocol_settings": variant_config("chord_standard_swim", self._args()), "m": 8, "r": min(4, self.config["nodes"] - 1), "started_utc": self.wall_epoch.isoformat(), "oracle": "Mathematical successor over controller-known live IDs AND addresses", "correctness_window_sec": 10, "routing_recovery": "Two consecutive full-routing observations, nominally 1 s apart; client lookups continue", "traffic": "Proxy request attempts and request+response body bytes; excludes HTTP/TCP/IP headers and dashboard management traffic", "limitations": ["Both rings run concurrently on one host; interactive exploration, not an isolated benchmark", "Control polling and lookup traffic can affect timing and trigger Chord repairs", "Fault actions are paired; responses spanning a topology change are excluded and counted", "Ground truth process status differs from SWIM's local membership view", "Histories, events and samples are bounded; export cumulative counters and retained recent samples", "Full-routing recovery is distinct from lookup availability; null recovery is not observed, not infinite", "Delay injection is application-level incoming peer delay, not packet loss or arbitrary partitions"]}}
+            result = {"status": self.status, "storage_operations": copy.deepcopy(list(self.storage_operations)), "initial_storage": {"seed":self.seed,"complete":self.seed_complete,"records":copy.deepcopy(self.seed_records)}, "error": self.error, "config": self.config, "elapsed": self.elapsed(), "node_ids": self.node_ids, "variants": copy.deepcopy(self.last_snapshot), "events": list(self.events), "faults": copy.deepcopy(self.faults), "generation": self.generation, "provenance": {"binary_sha256": self.hashes, "protocol_settings": variant_config("chord_standard_swim", self._args()), "m": 8, "r": min(4, self.config["nodes"] - 1), "started_utc": self.wall_epoch.isoformat(), "oracle": "Mathematical successor over controller-known live IDs AND addresses", "correctness_window_sec": 10, "routing_recovery": "Two consecutive full-routing observations, nominally 1 s apart; client lookups continue", "traffic": "Proxy request attempts and request+response body bytes; excludes HTTP/TCP/IP headers and dashboard management traffic", "limitations": ["Both rings run concurrently on one host; interactive exploration, not an isolated benchmark", "Control polling and lookup traffic can affect timing and trigger Chord repairs", "Fault actions are paired; responses spanning a topology change are excluded and counted", "Ground truth process status differs from SWIM's local membership view", "Histories, events and samples are bounded; export cumulative counters and retained recent samples", "Full-routing recovery is distinct from lookup availability; null recovery is not observed, not infinite", "Delay injection is application-level incoming peer delay, not packet loss or arbitrary partitions"]}}
             if export:
                 result["samples"] = {key: list(self.samples[key]) for key in KEYS}
             return result
@@ -435,6 +524,13 @@ class Manager:
             if not self.experiment:
                 raise ValueError("Start an experiment first")
             self.experiment.act(data.get("action"), data.get("node"), data.get("delay_ms", 100))
+        return self.snapshot()
+
+    def storage(self, data):
+        with self.control:
+            if not self.experiment:
+                raise ValueError("Start an experiment first")
+            self.experiment.storage(data)
         return self.snapshot()
 
     def snapshot(self, export=False):

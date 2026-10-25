@@ -324,3 +324,5 @@ recovery observations and limitations.
 Run `python3 -m visualizer.dashboard.server` and open http://127.0.0.1:8787 to compare real 2–64-node Chord and Chord + SWIM rings, inject paired crashes or delays, inspect routing and membership, and export measurements. See [the live lab guide](visualizer/dashboard/README.md) for controls and measurement definitions. This concurrent local demonstration complements the controlled benchmark harness.
 
 For the 16-, 32-, and 64-node experiments, see [large-ring testing instructions](orchestrator/LARGE_RING_TESTING.md).
+
+The dashboard also supports experimental owner-local **Put/Get storage** in both Go variants. Read [the storage guide](visualizer/dashboard/STORAGE.md) before interpreting crash results: records are in memory, with no replication or migration.

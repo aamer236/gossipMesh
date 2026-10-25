@@ -34,3 +34,20 @@ node --check visualizer/dashboard/app.js
 The opt-in test starts real 2-, 4-, and 8-node paired rings, checks healthy ownership, exercises crash/recovery/restart and delay/heal on the four-node ring, and verifies process cleanup. Baseline Go code is reused without modifications.
 
 For 16–64-node settings and sequential benchmark commands, see [large-ring testing](../../orchestrator/LARGE_RING_TESTING.md). Large rings use compact dots; select a node to inspect its ID and routing state.
+
+## Demonstrating SWIM-triggered Chord repairs
+
+1. Start four nodes and wait for **Running**. For a presentation, inspect node 0's fingers before crashing node 128.
+2. In **Node routing and finger tables**, choose any observer node. Each row shows the zero-based finger index, `(node ID + 2^index) mod 2^M`, its owner in the selected episode's last collected pre-crash snapshot, current owner, and an independent current-owner oracle. Changed rows are highlighted; hover the owner to see its address.
+3. Crash node 128 using the paired fault controls. In **SWIM → Chord failure evidence**, select the crash episode. The stages show only observed source events: suspicion, death, coordinator receipt, affected references, dirty fingers and validated repair events. The table includes the surviving observer ID and the Go event's source timestamp.
+4. Match a `finger_repaired` event's `local_id`, `index`, `start` and `owner` to that observer's finger row. This demonstrates that the membership-driven coordinator executed that repair. `references_identified` shows the affected successor/predecessor/list/fingers. `successor_repair_validated` records validated successor repair when that path is needed.
+5. An unobserved stage is not fabricated or treated as a failure: ordinary maintenance or lookups can repair references first; unrelated observers may have nothing to repair. A completed job may have zero repaired references. Changed routing rows alone do not attribute cause to SWIM.
+6. Export the run before starting another experiment. Up to 40 fault records are retained, each crash episode retaining at most 256 relevant events plus its pre-crash snapshots. Any later fault action closes collection for the previous episode; existing evidence remains available. The general event stream has its separate bound.
+
+Snapshots are sampled, not atomic with process termination. Before-values mean the last collected pre-crash snapshot. Source event timestamps and dashboard collection times differ; events from different observers may be collected in a different order. Crashed nodes have no current live snapshot. Restarting a node starts a new membership episode and does not rewrite the earlier crash's evidence.
+
+## Put/Get storage
+
+The **Store and retrieve the same record** panel performs real paired Put/Get operations through Chord into each owner Go process's memory. See [storage behavior, API and limitations](STORAGE.md). This first version has no replication, persistence or key migration; storage availability must not be confused with routing recovery.
+
+New experiments automatically preload a shared random set of records after convergence. The **Keys stored by each node** table compares the actual Go-process inventories; **Inspect** opens values and fingers. Export includes the random seed and both variants' actual write replies. Restart does not refill lost records.

@@ -92,6 +92,8 @@ def make_server(manager, port=8787):
                     if data != {}:
                         raise ValueError("Stop takes no arguments")
                     result = manager.stop()
+                elif path == "/api/storage":
+                    result = manager.storage(data)
                 elif path == "/api/fault":
                     result = manager.act(data)
                 else:
