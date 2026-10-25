@@ -399,6 +399,12 @@ func (n *ChordNode) CheckPredecessor() {
 		return
 	}
 
+	// Only periodic predecessor checks may share SWIM reachability evidence.
+	// Lookup ownership and repair commits always perform their normal validation.
+	if n.transport.swim != nil && n.transport.swim.table.RecentAck(pred) {
+		n.transport.swim.telemetry.Add("predecessor_checks_shared", 1)
+		return
+	}
 	if err := n.transport.PingRPC(pred.Addr); err != nil {
 		n.mu.Lock()
 		if n.Predecessor != nil && n.Predecessor.Addr == pred.Addr {

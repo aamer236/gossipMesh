@@ -252,7 +252,7 @@ func (m *Membership) merge(u Update, guard *Member) (bool, error) {
 		return false, nil
 	}
 	now := m.now()
-	member := Member{Update: cloneUpdate(u), ChangedAt: now, LastAck: old.LastAck, ackVersion: old.ackVersion}
+	member := Member{Update: cloneUpdate(u), ChangedAt: now, ackVersion: old.ackVersion}
 	if u.State == Suspect {
 		member.SuspectUntil = now.Add(m.cfg.SuspicionTimeout)
 	}
@@ -453,4 +453,18 @@ func (m *Membership) Expire(now time.Time) {
 			m.telemetry.Emit("error", peerID(u.Peer), map[string]interface{}{"operation": "expire", "error": err.Error()})
 		}
 	}
+}
+
+// RecentAck is evidence from a correlated probe, never from gossip. Every
+// membership transition clears LastAck, including a new incarnation's ALIVE.
+func (m *Membership) RecentAck(peer *NodeRef) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	member, ok := m.members[peerID(peer)]
+	ttl := m.cfg.Interval
+	if ttl > 200*time.Millisecond {
+		ttl = 200 * time.Millisecond
+	}
+	age := m.now().Sub(member.LastAck)
+	return ok && samePeer(member.Peer, peer) && member.State == Alive && !member.LastAck.IsZero() && age >= 0 && age < ttl
 }

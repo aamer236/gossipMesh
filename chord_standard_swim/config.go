@@ -34,6 +34,7 @@ type Config struct {
 	CheckPredInterval  time.Duration
 	RPCTimeout         time.Duration
 	SWIM               SWIMConfig
+	Adaptive           AdaptiveConfig
 	LogLevel           string
 }
 
@@ -104,6 +105,31 @@ func loadConfig() (*Config, error) {
 		}
 		*entry.out = time.Duration(value) * time.Millisecond
 	}
+	cfg.Adaptive.Enabled, err = strconv.ParseBool(envDefault("ADAPTIVE_MAINTENANCE", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("ADAPTIVE_MAINTENANCE must be true or false")
+	}
+	cfg.Adaptive.StableAfter = 2 * time.Second
+	adaptiveDurations := []struct {
+		name string
+		def  int
+		out  *time.Duration
+	}{
+		{"ADAPTIVE_STABLE_AFTER_MS", 2000, &cfg.Adaptive.StableAfter},
+		{"ADAPTIVE_MAX_STABILIZE_MS", 5000, &cfg.Adaptive.MaxStabilizeInterval},
+		{"ADAPTIVE_MAX_FIX_FINGERS_MS", 2000, &cfg.Adaptive.MaxFixFingersInterval},
+		{"ADAPTIVE_MAX_CHECK_PRED_MS", 5000, &cfg.Adaptive.MaxCheckPredInterval},
+	}
+	for _, entry := range adaptiveDurations {
+		value, e := envInt(entry.name, entry.def, 1, 300000)
+		if e != nil {
+			return nil, e
+		}
+		*entry.out = time.Duration(value) * time.Millisecond
+	}
+	if cfg.Adaptive.Enabled && (cfg.Adaptive.MaxStabilizeInterval < cfg.StabilizeInterval || cfg.Adaptive.MaxFixFingersInterval < cfg.FixFingersInterval || cfg.Adaptive.MaxCheckPredInterval < cfg.CheckPredInterval) {
+		return nil, fmt.Errorf("adaptive maximum intervals must be >= corresponding base maintenance intervals")
+	}
 	cfg.SWIM.IndirectHelpers, err = envInt("SWIM_INDIRECT_HELPERS", 3, 0, 8)
 	if err != nil {
 		return nil, err
@@ -163,4 +189,11 @@ func validAddress(addr string) error {
 		return fmt.Errorf("port must be in [1,65535]")
 	}
 	return nil
+}
+
+func envDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

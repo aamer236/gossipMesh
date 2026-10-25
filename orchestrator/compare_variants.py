@@ -207,14 +207,14 @@ def recovery_time(samples, nodes, window=1.0):
     return None
 
 
-def workload(peers, alive, keys, seconds, rate, epoch=None):
+def workload(peers, alive, keys, seconds, rate, epoch=None, start_delay_sec=0):
     """Fixed offered schedule; bounded in-flight requests, explicit overload failures."""
     epoch = time.monotonic() if epoch is None else epoch
     futures, samples = [], []
     slots = threading.BoundedSemaphore(32)
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
-        for i in range(int(seconds * rate)):
-            scheduled = i / rate
+        for i in range(round((seconds - start_delay_sec) * rate)):
+            scheduled = start_delay_sec + i / rate
             time.sleep(max(0, epoch + scheduled - time.monotonic()))
             peer = peers[i % len(peers)]
             key = keys[(i // len(peers)) % len(keys)]
@@ -240,6 +240,95 @@ def workload(peers, alive, keys, seconds, rate, epoch=None):
     return sorted(samples, key=lambda s: s["scheduled_sec"])
 
 
+def routing_observation(peers, victim, epoch):
+    """Read-only observation: never issue a lookup that could repair a route."""
+    states = [
+        runner.get_json(f"http://127.0.0.1:{p['port']}/state", timeout=0.5)
+        for p in peers
+    ]
+    references = {}
+    for peer, state in zip(peers, states):
+        if not state:
+            references[str(peer["id"])] = None
+            continue
+
+        def matches(ref):
+            return bool(
+                ref and int(ref["id"]) == victim["id"] and ref["addr"] == victim["addr"]
+            )
+
+        references[str(peer["id"])] = {
+            "successor": matches(state.get("successor")),
+            "predecessor": matches(state.get("predecessor")),
+            "successor_list_entries": sum(
+                matches(ref) for ref in state["successor_list"]
+            ),
+            "fingers": [ref["index"] for ref in state["fingers"] if matches(ref)],
+        }
+    return {
+        "observed_sec": time.monotonic() - epoch,
+        "routing_converged": bool(all(states) and runner.ring_converged(states)),
+        "references_to_victim": references,
+    }
+
+
+def first_routing_convergence(observations):
+    previous = False
+    for observation in observations:
+        if previous and observation["routing_converged"]:
+            return observation["observed_sec"]
+        previous = observation["routing_converged"]
+    return None
+
+
+def variant_config(variant, args):
+    """Explicit experiment settings, also preserved in each raw run's config."""
+    config = {
+        "M": str(args.m),
+        "R": str(min(4, args.nodes - 1)),
+        "STABILIZE_INTERVAL_MS": str(args.stabilize_ms),
+        "FIX_FINGERS_INTERVAL_MS": str(args.fix_ms),
+        "CHECK_PRED_INTERVAL_MS": str(args.check_pred_ms),
+        "RPC_TIMEOUT_MS": str(getattr(args, "rpc_timeout_ms", 250)),
+        "SWIM_INTERVAL_MS": str(getattr(args, "swim_interval_ms", 200)),
+        "SWIM_DIRECT_TIMEOUT_MS": str(getattr(args, "swim_direct_ms", 50)),
+        "SWIM_INDIRECT_HELPERS": "2",
+        "SWIM_SUSPICION_TIMEOUT_MS": str(args.swim_suspicion_ms),
+        "SWIM_MAX_MEMBERS": "128",
+        "LOG_LEVEL": "info",
+    }
+    if variant == "chord_standard_swim":
+        config.update(
+            ADAPTIVE_MAINTENANCE=str(
+                getattr(args, "swim_adaptive_maintenance", False)
+            ).lower(),
+            ADAPTIVE_STABLE_AFTER_MS=str(
+                getattr(args, "adaptive_stable_after_ms", 2000)
+            ),
+            ADAPTIVE_MAX_STABILIZE_MS=str(
+                getattr(args, "adaptive_max_stabilize_ms", 5000)
+            ),
+            ADAPTIVE_MAX_FIX_FINGERS_MS=str(
+                getattr(args, "adaptive_max_fix_ms", 2000)
+            ),
+            ADAPTIVE_MAX_CHECK_PRED_MS=str(
+                getattr(args, "adaptive_max_check_pred_ms", 5000)
+            ),
+        )
+    return config
+
+
+def process_environment(config):
+    """Prevent inherited protocol settings from changing a controlled run."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in config and not key.startswith(("SWIM_", "ADAPTIVE_"))
+    }
+    env.update(config)
+    return env
+
+
 def run_variant(variant, binary, args, repetition, directory):
     processes, proxies, reservations = [], [], []
     logs = []
@@ -250,20 +339,7 @@ def run_variant(variant, binary, args, repetition, directory):
         "binary_sha256": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
         "status": "incomplete",
     }
-    config = {
-        "M": str(args.m),
-        "R": str(min(4, args.nodes - 1)),
-        "STABILIZE_INTERVAL_MS": str(args.stabilize_ms),
-        "FIX_FINGERS_INTERVAL_MS": str(args.fix_ms),
-        "CHECK_PRED_INTERVAL_MS": str(args.stabilize_ms),
-        "RPC_TIMEOUT_MS": "250",
-        "SWIM_INTERVAL_MS": "200",
-        "SWIM_DIRECT_TIMEOUT_MS": "50",
-        "SWIM_INDIRECT_HELPERS": "2",
-        "SWIM_SUSPICION_TIMEOUT_MS": "1200",
-        "SWIM_MAX_MEMBERS": "128",
-        "LOG_LEVEL": "info",
-    }
+    config = variant_config(variant, args)
     result["config"] = config
     try:
         with contextlib.ExitStack() as handles:
@@ -296,13 +372,8 @@ def run_variant(variant, binary, args, repetition, directory):
             )
 
             def start(index):
-                env = {
-                    k: v
-                    for k, v in os.environ.items()
-                    if k not in config and not k.startswith("SWIM_")
-                }
+                env = process_environment(config)
                 env.update(
-                    config,
                     PORT=str(peers[index]["port"]),
                     NODE_ID=str(peers[index]["id"]),
                     ADVERTISE_ADDR=peers[index]["addr"],
@@ -352,14 +423,36 @@ def run_variant(variant, binary, args, repetition, directory):
                 epoch = time.monotonic()
                 if action:
                     action()
+                observations = []
+                observer_stop = threading.Event()
+                observer = None
+                delay = args.crash_quiet_ms / 1000 if name == "crash_recovery" else 0
+                if name == "crash_recovery":
+
+                    def observe():
+                        while not observer_stop.is_set():
+                            observations.append(
+                                routing_observation(active, peers[victim_index], epoch)
+                            )
+                            observer_stop.wait(0.1)
+
+                    observer = threading.Thread(target=observe)
+                    observer.start()
                 timer = threading.Timer(seconds, end_action) if end_action else None
                 if timer:
                     timer.start()
                 try:
-                    samples = workload(active, active, keys, seconds, args.rate, epoch)
+                    samples = workload(
+                        active, active, keys, seconds, args.rate, epoch, delay
+                    )
                     # Finish the full fault interval even when the final reply is fast.
                     time.sleep(max(0, epoch + seconds - time.monotonic()))
                 finally:
+                    observer_stop.set()
+                    if observer:
+                        observer.join(timeout=5)
+                        if observer.is_alive():
+                            raise RuntimeError("routing observer failed to stop")
                     if timer:
                         timer.join(timeout=3)
                         end_action()
@@ -416,13 +509,28 @@ def run_variant(variant, binary, args, repetition, directory):
                     else None
                 )
                 result["phases"][name] = summary
+                if name == "crash_recovery":
+                    summary["lookup_start_delay_sec"] = delay
+                    summary["routing_observations"] = observations
+                    summary["routing_convergence_sec"] = first_routing_convergence(
+                        observations
+                    )
+                    summary["quiet_routing_convergence_sec"] = (
+                        first_routing_convergence(
+                            [o for o in observations if o["observed_sec"] < delay]
+                        )
+                        if delay
+                        else None
+                    )
                 return samples
 
             try:
                 for i, reservation in enumerate(reservations):
                     reservation.close()
                     processes.append(start(i))
-                wait_for(lambda: converged(peers), "initial convergence", seconds=60)
+                join_started = time.monotonic()
+                wait_for(lambda: converged(peers), "initial convergence", seconds=getattr(args, "convergence_seconds", 180))
+                result["initial_convergence_sec"] = time.monotonic() - join_started
                 phase("healthy", peers, args.phase_seconds)
                 # The oracle still includes the live, delayed victim.
                 phase(
@@ -434,7 +542,7 @@ def run_variant(variant, binary, args, repetition, directory):
                     ),
                     end_action=lambda: proxies[victim_index].set_delay(0),
                 )
-                wait_for(lambda: converged(peers), "gray fault healing", seconds=60)
+                wait_for(lambda: converged(peers), "gray fault healing", seconds=getattr(args, "convergence_seconds", 180))
                 phase("gray_recovered", peers, args.phase_seconds)
 
                 def crash():
@@ -445,14 +553,18 @@ def run_variant(variant, binary, args, repetition, directory):
                     "crash_recovery", survivors, args.recovery_seconds, action=crash
                 )
                 result["phases"]["crash_recovery"]["recovery_time_sec"] = recovery_time(
-                    samples, [p["id"] for p in survivors]
+                    samples,
+                    [p["id"] for p in survivors],
+                    args.recovery_window_ms / 1000,
                 )
                 wait_for(
                     lambda: converged(survivors), "post-crash convergence", seconds=60
                 )
                 phase("post_crash", survivors, args.phase_seconds)
                 processes[victim_index] = start(victim_index)
-                wait_for(lambda: converged(peers), "restart convergence", seconds=60)
+                rejoin_started = time.monotonic()
+                wait_for(lambda: converged(peers), "restart convergence", seconds=getattr(args, "convergence_seconds", 180))
+                result["restart_convergence_sec"] = time.monotonic() - rejoin_started
                 phase("restart", peers, args.phase_seconds)
                 result["status"] = "completed"
                 result["acceptance_passed"] = all(
@@ -532,6 +644,8 @@ def comparison_rows(runs):
                 "mean_hops",
                 "recovery_time_sec",
                 "mean_process_heap_bytes",
+                "routing_convergence_sec",
+                "quiet_routing_convergence_sec",
             ):
                 observations = [v[field] for v in values if v.get(field) is not None]
                 row[field] = (
@@ -547,22 +661,55 @@ def comparison_rows(runs):
     return rows
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chord-binary", required=True)
     parser.add_argument("--swim-binary", required=True)
     parser.add_argument("--output", default="reports/chord-swim-comparison.json")
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--nodes", type=int, default=4, choices=range(4, 9))
+    parser.add_argument("--nodes", type=int, default=4, choices=range(4, 65))
     parser.add_argument("--m", type=int, default=4, choices=range(3, 13))
+    parser.add_argument("--convergence-seconds", type=int, default=180, help="Startup/heal/rejoin convergence timeout")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--phase-seconds", type=int, default=4)
     parser.add_argument("--recovery-seconds", type=int, default=6)
     parser.add_argument("--rate", type=int, default=24)
     parser.add_argument("--gray-delay-ms", type=int, default=100)
     parser.add_argument("--stabilize-ms", type=int, default=200)
+    parser.add_argument(
+        "--check-pred-ms",
+        type=int,
+        default=None,
+        help="predecessor check interval; defaults to stabilize-ms for compatibility",
+    )
     parser.add_argument("--fix-ms", type=int, default=100)
-    args = parser.parse_args()
+    parser.add_argument("--rpc-timeout-ms", type=int, default=250)
+    parser.add_argument("--swim-interval-ms", type=int, default=200)
+    parser.add_argument("--swim-direct-ms", type=int, default=50)
+    parser.add_argument("--swim-suspicion-ms", type=int, default=1200)
+    parser.add_argument(
+        "--swim-adaptive-maintenance",
+        action="store_true",
+        help="enable adaptive Chord maintenance only in the SWIM variant",
+    )
+    parser.add_argument("--adaptive-stable-after-ms", type=int, default=2000)
+    parser.add_argument("--adaptive-max-stabilize-ms", type=int, default=5000)
+    parser.add_argument("--adaptive-max-fix-ms", type=int, default=2000)
+    parser.add_argument("--adaptive-max-check-pred-ms", type=int, default=5000)
+    parser.add_argument(
+        "--crash-quiet-ms",
+        type=int,
+        default=0,
+        help="withhold client lookups after crash; observe state without lookup RPCs",
+    )
+    parser.add_argument("--recovery-window-ms", type=int, default=1000)
+    args = parser.parse_args(argv)
+    if args.nodes > 1 << args.m:
+        parser.error("nodes must fit in the identifier space; use --m 8 for up to 64 nodes")
+    if args.convergence_seconds < 1:
+        parser.error("convergence-seconds must be positive")
+    if args.check_pred_ms is None:
+        args.check_pred_ms = args.stabilize_ms
     if (
         min(
             args.repeats,
@@ -570,14 +717,52 @@ def main():
             args.rate,
             args.gray_delay_ms,
             args.stabilize_ms,
+            args.check_pred_ms,
             args.fix_ms,
+            args.recovery_window_ms,
         )
         < 1
         or args.recovery_seconds < 2
     ):
         parser.error("positive parameters required; recovery-seconds must be >=2")
+    if args.rpc_timeout_ms < 1 or args.swim_direct_ms < 1 or args.swim_interval_ms < 3 * args.swim_direct_ms:
+        parser.error("RPC/direct timeouts must be positive and SWIM interval >= 3 * direct timeout")
+    if args.swim_suspicion_ms < 2 * args.swim_interval_ms:
+        parser.error(
+            "swim-suspicion-ms must be >= two SWIM protocol intervals"
+        )
+    if args.adaptive_stable_after_ms < 1:
+        parser.error("adaptive-stable-after-ms must be positive")
+    if args.swim_adaptive_maintenance:
+        for adaptive_name, base_name in (
+            ("adaptive_max_stabilize_ms", "stabilize_ms"),
+            ("adaptive_max_fix_ms", "fix_ms"),
+            ("adaptive_max_check_pred_ms", "check_pred_ms"),
+        ):
+            if getattr(args, adaptive_name) < getattr(args, base_name):
+                parser.error(
+                    f"{adaptive_name.replace('_', '-')} must be >= "
+                    f"{base_name.replace('_', '-')} when adaptive maintenance is enabled"
+                )
+    if (
+        not 0
+        <= args.crash_quiet_ms
+        <= args.recovery_seconds * 1000 - 2 * args.recovery_window_ms
+    ):
+        parser.error(
+            "quiet period must leave at least two recovery cohorts for lookups"
+        )
+    if args.rate * args.recovery_window_ms < args.nodes * 1000:
+        parser.error(
+            "rate and recovery-window-ms must allow every node to be sampled each cohort"
+        )
     if args.rate < args.nodes:
         parser.error("rate must be >= nodes so every survivor is sampled each second")
+    return args
+
+
+def main():
+    args = parse_args()
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     binaries = {
@@ -590,7 +775,7 @@ def main():
         "methodology": vars(args),
         "runs": [],
         "fault_model": "100% of incoming peer RPCs to one live victim delayed before forwarding; client lookups/management bypass proxy; no packet loss; after healing kill same victim",
-        "recovery_rule": "two consecutive one-second scheduled cohorts >=99% oracle-correct per survivor; completion time included; null means not observed within fixed window",
+        "recovery_rule": f"two consecutive {args.recovery_window_ms}ms scheduled cohorts >=99% oracle-correct per survivor; completion time and intentional quiet delay included; null means not observed within fixed window",
         "traffic_units": "destination proxy request attempts and JSON body bytes, including SWIM; no HTTP/TCP/IP overhead; proxy errors include client disconnects",
         "limitations": [
             "Local proxy overhead affects both variants; not equivalent to netem packet delay.",
@@ -627,7 +812,7 @@ def write_markdown(path, result):
         "",
         f"Generated {result['run_at_utc']}. Acceptance passed: {result['acceptance_passed']}.",
         "",
-        "Same offered lookup schedule, IDs, Chord timers, gray fault and hard-crash victim. Runs execute sequentially with alternating order.",
+        "Same offered lookup schedule, IDs, initial Chord timers, gray fault and hard-crash victim. Runs execute sequentially with alternating order. Adaptive maintenance, when enabled, applies only to the SWIM variant; each run's raw config records the policy.",
         "",
         "Values below are medians of per-run results. Raw samples, ranges, counters and SWIM events are in the companion JSON.",
         "",
@@ -667,6 +852,30 @@ def write_markdown(path, result):
     lines += [f"- {item}" for item in result["limitations"]]
     lines += [
         "",
+        "## Background routing observation",
+        "",
+        "State is sampled through read-only /state requests about every 100ms. Routing convergence requires two consecutive samples with correct neighbors, successor lists and every finger. This observer never supplies routes or issues lookup RPCs. Quiet convergence counts only observations before the first scheduled client lookup; a blank value means it was not observed in that window.",
+        "",
+        "| Variant | Trial | Lookup delay s | Routing converged s | During quiet window s | Initial convergence s | Rejoin convergence s |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for run in result["runs"]:
+        crash = run["phases"].get("crash_recovery", {})
+        values = [
+            crash.get("lookup_start_delay_sec"),
+            crash.get("routing_convergence_sec"),
+            crash.get("quiet_routing_convergence_sec"),
+            run.get("initial_convergence_sec"),
+            run.get("restart_convergence_sec"),
+        ]
+        formatted = ["—" if value is None else f"{value:.3f}" for value in values]
+        lines.append(
+            f"| {run['variant']} | {run['repetition'] + 1} | "
+            + " | ".join(formatted)
+            + " |"
+        )
+    lines += [
+        "",
         "## Peer traffic and memory",
         "",
         "Per-phase medians across runs. Traffic is measured at proxies; Go heap is a whole-process snapshot averaged over active nodes. Neither includes proxy Python memory.",
@@ -699,7 +908,7 @@ def write_markdown(path, result):
         )
     lines += [
         "",
-        "The recovery statistic has one-second cohorts and a two-second minimum. Equal values at that floor cannot establish equal detection/repair speed. Inspect raw request completion times and SWIM events for finer timing; lookup-triggered Chord repair can finish before SWIM confirmation.",
+        "The recovery floor is twice the configured cohort duration plus any intentional quiet period. Equal values at that floor cannot establish equal detection/repair speed. Read-only routing observations separately record convergence; lookup-triggered Chord repair can finish before SWIM confirmation.",
         "",
         "Do not combine these results with older Docker/netem or standalone verifier reports: their fault models, workloads and timing differ.",
     ]
@@ -745,6 +954,9 @@ def write_csv(path, result):
         "latency_p99_ms",
         "mean_hops",
         "recovery_time_sec",
+        "routing_convergence_sec",
+        "quiet_routing_convergence_sec",
+        "lookup_start_delay_sec",
         "peer_requests",
         "peer_body_bytes",
         "mean_process_heap_bytes",

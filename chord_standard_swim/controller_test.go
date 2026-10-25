@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -411,5 +413,99 @@ func TestGossipMeshInFlightRepairRespectsNewerMembership(t *testing.T) {
 				t.Fatal("installed a candidate whose DEAD hint arrived during its ping")
 			}
 		})
+	}
+}
+
+func TestUnrelatedMembershipDoesNotScheduleRepairs(t *testing.T) {
+	node, _ := chordFixture(t, 0)
+	target, _ := chordFixture(t, 64)
+	c := NewCoordinator(context.Background(), node, NewTelemetry("0", "quiet", nil), 128)
+	defer c.Stop()
+	for _, state := range []MemberState{Alive, Suspect, Dead} {
+		c.Submit(eventFor(target, state, 0))
+		if len(c.pending) != 0 {
+			t.Fatal("unrelated membership scheduled network work")
+		}
+	}
+	if !node.peerBlocked(target.Addr) {
+		t.Fatal("skipped job lost DEAD hint")
+	}
+	c.Submit(eventFor(target, Alive, 1))
+	if node.peerBlocked(target.Addr) || len(c.pending) != 0 {
+		t.Fatal("rejoin hint not applied without work")
+	}
+}
+
+func TestQueuedDeathSupersededByAliveRetiresDirtySuccessor(t *testing.T) {
+	node, _ := chordFixture(t, 0)
+	target, _ := chordFixture(t, 64)
+	node.mu.Lock()
+	node.setSuccessorLocked(&NodeRef{ID: target.ID, Addr: target.Addr})
+	node.mu.Unlock()
+	c := NewCoordinator(context.Background(), node, NewTelemetry("0", "quiet", nil), 128)
+	defer c.Stop()
+	c.Submit(eventFor(target, Dead, 0))
+	c.Submit(eventFor(target, Alive, 1))
+	c.Start()
+	await(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return len(c.pending) == 0 })
+	if node.hasDirtyReferences("64") || node.peerBlocked(target.Addr) {
+		t.Fatal("refutation left stale work")
+	}
+}
+func TestPredecessorCheckSharesOnlyFreshAcknowledgement(t *testing.T) {
+	node, _ := chordFixture(t, 0)
+	target, server := chordFixture(t, 64)
+	peer := &NodeRef{ID: target.ID, Addr: target.Addr}
+	table := testMembership(t, 0)
+	now := time.Unix(100, 0)
+	table.now = func() time.Time { return now }
+	table.Acknowledge(Update{Peer: peer, State: Alive})
+	node.transport.swim = NewSWIM(table, nil, table.telemetry)
+	node.mu.Lock()
+	node.Predecessor = peer
+	node.mu.Unlock()
+	server.Close()
+	node.CheckPredecessor()
+	if node.GetRoutingSnapshot().Predecessor == nil {
+		t.Fatal("fresh ACK not reused")
+	}
+	now = now.Add(table.cfg.Interval)
+	node.CheckPredecessor()
+	if node.GetRoutingSnapshot().Predecessor != nil {
+		t.Fatal("expired ACK suppressed failed check")
+	}
+}
+
+func TestBackupValidationIsRetriedAfterDeadReferenceRemoved(t *testing.T) {
+	node, _ := chordFixture(t, 0)
+	var pings int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rpc/ping" && atomic.AddInt32(&pings, 1) == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		if r.URL.Path == "/rpc/predecessor_and_list" {
+			json.NewEncoder(w).Encode(PredAndListResp{M: 8})
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+	healthy := &NodeRef{ID: big.NewInt(64), Addr: server.Listener.Addr().String()}
+	failed := &ChordNode{ID: big.NewInt(128), Addr: "127.0.0.1:24128"}
+	node.mu.Lock()
+	node.setSuccessorLocked(healthy)
+	node.SuccessorList = []*NodeRef{healthy, {ID: failed.ID, Addr: failed.Addr}}
+	node.mu.Unlock()
+	c := NewCoordinator(context.Background(), node, NewTelemetry("0", "quiet", nil), 128)
+	defer c.Stop()
+	c.Submit(eventFor(failed, Dead, 0))
+	c.Start()
+	await(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return len(c.pending) == 0 })
+	if atomic.LoadInt32(&pings) < 2 {
+		t.Fatal("removed reference lost outstanding backup validation")
+	}
+	if c.failures != 0 || c.completed != 1 {
+		t.Fatal("backup retry failed")
 	}
 }

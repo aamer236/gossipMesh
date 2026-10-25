@@ -19,7 +19,7 @@ func NewHTTPSWIMTransport(t *Telemetry) *HTTPSWIMTransport {
 	return &HTTPSWIMTransport{client: &http.Client{Timeout: 30 * time.Second}, telemetry: t}
 }
 func (t *HTTPSWIMTransport) Exchange(ctx context.Context, addr string, msg SWIMMessage) (SWIMMessage, error) {
-	raw, err := json.Marshal(msg)
+	raw, err := encodeSWIM(msg)
 	if err != nil {
 		return SWIMMessage{}, err
 	}
@@ -47,11 +47,8 @@ func (t *HTTPSWIMTransport) Exchange(ctx context.Context, addr string, msg SWIMM
 	if resp.StatusCode != http.StatusOK {
 		return SWIMMessage{}, fmt.Errorf("SWIM HTTP %d: %s", resp.StatusCode, string(data))
 	}
-	var reply SWIMMessage
-	if err = json.Unmarshal(data, &reply); err != nil {
-		return SWIMMessage{}, err
-	}
-	return reply, nil
+	reply, _, err := decodeSWIM(data)
+	return reply, err
 }
 func (s *SWIM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -70,13 +67,9 @@ func (s *SWIM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	s.telemetry.Add("swim_payload_bytes_received", uint64(len(raw)))
 	var msg SWIMMessage
+	compact := false
 	if err == nil {
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		err = decoder.Decode(&msg)
-		if err == nil && decoder.Decode(new(interface{})) != io.EOF {
-			err = fmt.Errorf("trailing SWIM payload")
-		}
+		msg, compact, err = decodeSWIM(raw)
 	}
 	if err != nil {
 		s.writeHTTP(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -90,7 +83,16 @@ func (s *SWIM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTP(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	s.writeHTTP(w, http.StatusOK, reply)
+	if compact {
+		raw, encodeErr := encodeSWIM(reply)
+		if encodeErr != nil {
+			s.writeHTTP(w, 500, map[string]string{"error": encodeErr.Error()})
+			return
+		}
+		s.writeHTTP(w, http.StatusOK, json.RawMessage(raw))
+	} else {
+		s.writeHTTP(w, http.StatusOK, reply)
+	}
 }
 func (s *SWIM) writeHTTP(w http.ResponseWriter, status int, body interface{}) {
 	raw, err := json.Marshal(body)

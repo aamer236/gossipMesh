@@ -173,3 +173,154 @@ and traffic/memory overhead together. A fast Chord lookup fallback can recover
 before SWIM confirms death, so SWIM detection and lookup recovery are different
 measurements. No node implementation or existing baseline benchmark is changed
 by this shared harness.
+
+### Isolating the stabilization interval
+
+To repeat the paired comparison at 500ms stabilization while keeping the other
+maintenance settings identical to the original 200ms experiment:
+
+```bash
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline \
+  --swim-binary /tmp/chord-compare-swim \
+  --stabilize-ms 500 --check-pred-ms 200 --fix-ms 100 \
+  --repeats 3 --output reports/chord-swim-comparison-stabilize-500ms.json
+```
+
+`--check-pred-ms` separates predecessor checking from stabilization. If omitted,
+it follows `--stabilize-ms`, preserving the original harness behavior. Use an
+explicit value when isolating stabilization. The 500ms experiment keeps the same
+binaries, SWIM parameters, IDs, fault model, workloads, and recovery rule. It
+writes separate JSON/CSV/Markdown outputs, preserving the 200ms results.
+
+Moving from 200ms to 500ms reduces scheduled stabilization rounds from five to
+two per second (60%), not total protocol traffic by 60%: finger fixing,
+predecessor checks, lookup RPCs, and SWIM continue. The research question is
+whether a less frequently stabilized SWIM-enabled ring can retain lookup
+correctness and acceptable recovery/tail latency at a lower **total** message
+and payload cost. Compare each variant across intervals and also compare the
+500ms SWIM variant against the original 200ms baseline; three local trials are
+only descriptive evidence. A later interval sweep should vary both variants
+under the same workloads, rather than only weakening the baseline.
+
+See [the measured 200ms/500ms comparison](reports/stabilization-interval-comparison.md)
+for the current trial results, including both request counts and payload bytes.
+
+### Slower maintenance and shorter suspicion
+
+The slow-maintenance experiment uses stabilization/predecessor checking at
+1000ms and finger fixing at 500ms. Run all four conditions below with three
+paired trials each, using the same two binaries built above:
+
+```bash
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline --swim-binary /tmp/chord-compare-swim \
+  --stabilize-ms 1000 --check-pred-ms 1000 --fix-ms 500 \
+  --swim-suspicion-ms 1200 --recovery-window-ms 250 \
+  --output reports/slow-maintenance-continuous-suspect-1200.json
+
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline --swim-binary /tmp/chord-compare-swim \
+  --stabilize-ms 1000 --check-pred-ms 1000 --fix-ms 500 \
+  --swim-suspicion-ms 800 --recovery-window-ms 250 \
+  --output reports/slow-maintenance-continuous-suspect-800.json
+
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline --swim-binary /tmp/chord-compare-swim \
+  --stabilize-ms 1000 --check-pred-ms 1000 --fix-ms 500 \
+  --swim-suspicion-ms 1200 --recovery-window-ms 250 --crash-quiet-ms 2000 \
+  --output reports/slow-maintenance-quiet-suspect-1200.json
+
+python3 -m orchestrator.compare_variants \
+  --chord-binary /tmp/chord-compare-baseline --swim-binary /tmp/chord-compare-swim \
+  --stabilize-ms 1000 --check-pred-ms 1000 --fix-ms 500 \
+  --swim-suspicion-ms 800 --recovery-window-ms 250 --crash-quiet-ms 2000 \
+  --output reports/slow-maintenance-quiet-suspect-800.json
+```
+
+`--crash-quiet-ms` withholds client lookups, not protocol maintenance. A read-only
+`/state` observer samples all surviving routing tables about every 100ms, and
+never supplies routes or triggers lookup repair. The raw results preserve failed
+successor/predecessor/list/finger references over time. Routing convergence is
+reported at the second consecutive oracle-correct snapshot; quiet convergence
+requires both snapshots before the first scheduled client query. Missing values
+mean convergence was not observed within the relevant window.
+
+`--recovery-window-ms 250` reduces the continuous lookup recovery floor to 500ms.
+With a 2000ms quiet period, the earliest lookup-confirmed recovery is 2500ms;
+that intentional delay is included. Compare quiet background routing observations
+with each other, rather than interpreting delayed queries as slower detection.
+The offered rate must sample every node in each cohort. The default 24 queries/s
+suffices for this four-node study.
+
+Both variants retain identical Chord settings within each condition. The SWIM
+suspicion setting has no effect on plain Chord; repeated plain-Chord trials are
+independent controls. Initial/restart convergence durations are recorded because
+slower finger maintenance can delay joins. All configurations still test the
+100ms gray fault with the live victim included in the oracle. Shortening
+suspicion should be assessed using false death confirmations as well as repair
+speed. These experiments do not change the node implementation or the protocol
+defaults.
+
+The [slow-maintenance study report](reports/slow-maintenance-study.md) summarizes
+all four conditions, including pre-query repairs, lookup-versus-routing recovery,
+false death observations, traffic costs, and initial/rejoin convergence.
+
+### Standard-SWIM overhead repairs
+
+The coordinator now publishes every accepted membership hint but queues work only
+for affected references or outstanding dirty fingers. ALIVE/refutation events do
+not trigger unconditional stabilization. Death repair refreshes the successor
+list only when that list or the successor was affected. A queued death superseded
+by ALIVE can validate and retire its dirty successor marker.
+
+SWIM HTTP messages now use a compact version-2 JSON envelope with a per-message
+identity table. Origin, sender, target, witness and updates reference that table;
+exact copies of the sender update are omitted from piggyback data. Membership,
+incarnation, ACK correlation and full-view target selection semantics are unchanged.
+The endpoint accepts version-1 requests and answers in their original format.
+Version-2 clients require upgraded servers; mixed-version rolling upgrades with
+old servers are not supported. `/membership` and metrics retain their existing format.
+
+Periodic predecessor checking can reuse a correlated SWIM ACK for at most the
+smaller of one SWIM interval and 200 ms. Gossip ALIVE is insufficient, and every
+membership transition clears that evidence. Lookup and repair validation still
+use their existing RPC checks. A crash immediately after an ACK may postpone a
+predecessor check until its next scheduled run; this optimization is not a lease
+or proof of ownership.
+
+Build and verify the current implementation:
+
+```sh
+(cd chord_standard_swim && go test -race ./... && go vet ./... && go build -o /tmp/chord-swim-final .)
+python3 -m orchestrator.compare_variants --chord-binary /tmp/chord-compare-baseline --swim-binary /tmp/chord-swim-final --stabilize-ms 1000 --check-pred-ms 1000 --fix-ms 500 --swim-suspicion-ms 800 --crash-quiet-ms 2000 --recovery-window-ms 250 --repeats 3 --output reports/optimization-final.json
+```
+
+`orchestrator/optimization_study.py` runs four sequential paired experiments using
+preserved stage binaries: original, targeted scheduling, compact messages, then
+shared predecessor checks. It requires those binaries in `--binary-dir` (default
+`/tmp`); it does not recreate historical binaries from current source. Every raw
+report records binary hashes and configuration. Build/test workloads should finish
+before timing experiments start.
+
+Measured stage-by-stage results are in [reports/optimization-study.md](reports/optimization-study.md).
+The timed study uses preserved binaries; the final source additionally retains
+outstanding backup-list validation across repair retries. Its regression test
+requires a failed validation to be retried after the dead reference is removed.
+
+Adaptive periodic maintenance is available as an opt-in experiment. It backs off
+only after quiet local routing with no suspicion or repair work, then restores
+fast scheduling on membership changes, topology changes or failed Chord RPCs.
+Configuration, metrics, tests and paired benchmark commands are documented in
+[chord_standard_swim/ADAPTIVE_MAINTENANCE.md](chord_standard_swim/ADAPTIVE_MAINTENANCE.md).
+
+The first matched fixed/adaptive local study is recorded in
+[reports/adaptive-maintenance-study.md](reports/adaptive-maintenance-study.md),
+including actual scheduler intervals, operation counts, oracle results, traffic,
+recovery observations and limitations.
+
+### Interactive comparison dashboard
+
+Run `python3 -m visualizer.dashboard.server` and open http://127.0.0.1:8787 to compare real 2–64-node Chord and Chord + SWIM rings, inject paired crashes or delays, inspect routing and membership, and export measurements. See [the live lab guide](visualizer/dashboard/README.md) for controls and measurement definitions. This concurrent local demonstration complements the controlled benchmark harness.
+
+For the 16-, 32-, and 64-node experiments, see [large-ring testing instructions](orchestrator/LARGE_RING_TESTING.md).

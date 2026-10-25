@@ -7,14 +7,15 @@ import (
 )
 
 type repairJob struct {
-	Member        Member
-	Kind          string
-	Priority      int
-	Attempt       int
-	Due           time.Time
-	Sequence      uint64
-	QueuedAt      time.Time
-	RepairedTotal int
+	Member         Member
+	Kind           string
+	Priority       int
+	Attempt        int
+	Due            time.Time
+	Sequence       uint64
+	QueuedAt       time.Time
+	RepairedTotal  int
+	RefreshBackups bool
 }
 type Coordinator struct {
 	mu        sync.Mutex
@@ -84,8 +85,14 @@ func (c *Coordinator) Submit(event MembershipEvent) {
 	if member.State == Dead && refs.Successor {
 		priority = 0
 	}
-	c.sequence++
-	c.pending[key] = repairJob{Member: cloneMember(member), Kind: event.Kind, Priority: priority, Due: time.Now(), Sequence: c.sequence, QueuedAt: time.Now()}
+	// Publish hints even for unrelated peers, and cancel superseded queued work.
+	// ALIVE needs work only when a prior death left dirty fingers.
+	needsRepair := (member.State != Alive && refs.Count() > 0) || c.node.hasDirtyReferences(key)
+	delete(c.pending, key)
+	if needsRepair {
+		c.sequence++
+		c.pending[key] = repairJob{Member: cloneMember(member), Kind: event.Kind, Priority: priority, Due: time.Now(), Sequence: c.sequence, QueuedAt: time.Now(), RefreshBackups: member.State == Dead && (refs.Successor || refs.SuccessorList > 0)}
+	}
 	c.mu.Unlock()
 	c.telemetry.Emit("membership_event_handled", key, map[string]interface{}{"state": member.State, "incarnation": member.Incarnation, "event": event.Kind})
 	c.telemetry.Emit("references_identified", key, map[string]interface{}{"affected": refs, "state": member.State})
@@ -154,11 +161,14 @@ func (c *Coordinator) run() {
 				err := c.node.transport.PingRPC(job.Member.Peer.Addr)
 				c.telemetry.Emit("suspect_reference_validation", key, map[string]interface{}{"reachable": err == nil})
 			} else {
-				result = c.node.RepairPeerReferences(job.Member.Peer, job.Member.Incarnation, job.Member.State, 4, c.telemetry)
+				result = c.node.RepairPeerReferences(job.Member.Peer, job.Member.Incarnation, job.Member.State, 4, c.telemetry, job.RefreshBackups)
 			}
 			attemptLatency := float64(time.Since(started).Microseconds()) / 1000
 			latency := float64(time.Since(job.QueuedAt).Microseconds()) / 1000
 			job.RepairedTotal += result.Repaired
+			if result.BackupsValidated {
+				job.RefreshBackups = false
+			}
 			c.mu.Lock()
 			current, exists := c.pending[key]
 			if exists && current.Sequence == job.Sequence {

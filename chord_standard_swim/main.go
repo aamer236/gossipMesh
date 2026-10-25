@@ -26,7 +26,12 @@ func run(ctx context.Context, cfg *Config) error {
 	swimTransport := NewHTTPSWIMTransport(telemetry)
 	swim := NewSWIM(table, swimTransport, telemetry)
 	coordinator := NewCoordinator(ctx, node, telemetry, cfg.SWIM.MaxMembers)
-	table.onEvent = coordinator.Submit
+	policy := NewMaintenancePolicy(cfg, telemetry, time.Now())
+	transport.maintenance = policy
+	table.onEvent = func(event MembershipEvent) {
+		coordinator.Submit(event)
+		policy.Activity(time.Now(), event.Kind)
+	}
 	transport.swim = swim
 	transport.coordinator = coordinator
 	transport.telemetry = telemetry
@@ -70,25 +75,39 @@ func run(ctx context.Context, cfg *Config) error {
 	defer swim.Stop()
 	transport.setReady(true)
 	var maintenance sync.WaitGroup
-	for _, task := range []struct {
-		interval time.Duration
-		run      func()
-	}{{cfg.StabilizeInterval, node.Stabilize}, {cfg.FixFingersInterval, node.FixFingers}, {cfg.CheckPredInterval, node.CheckPredecessor}} {
+	observe := func() {
+		if !cfg.Adaptive.Enabled {
+			return
+		}
+		snapshot := node.GetRoutingSnapshot()
+		blocker := maintenanceBlocker(node, table, coordinator, snapshot)
+		policy.Observe(time.Now(), snapshot, blocker)
+	}
+	observe()
+	for index, operation := range []func(){node.Stabilize, node.FixFingers, node.CheckPredecessor} {
 		maintenance.Add(1)
-		go func(interval time.Duration, operation func()) {
+		go func(index int, operation func()) {
 			defer maintenance.Done()
-			ticker := time.NewTicker(interval)
+			policy.RunTask(ctx, index, operation, observe)
+		}(index, operation)
+	}
+	if cfg.Adaptive.Enabled {
+		maintenance.Add(1)
+		go func() {
+			defer maintenance.Done()
+			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					operation()
+					observe()
 				}
 			}
-		}(task.interval, task.run)
+		}()
 	}
+
 	<-ctx.Done()
 	transport.setReady(false)
 	cancel()

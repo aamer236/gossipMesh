@@ -21,6 +21,7 @@ type NetworkTransport struct {
 	swim          *SWIM
 	coordinator   *Coordinator
 	telemetry     *Telemetry
+	maintenance   *MaintenancePolicy
 	ready         bool
 	readyMu       sync.RWMutex
 	serverWG      sync.WaitGroup
@@ -115,6 +116,9 @@ func (t *NetworkTransport) StopListener() {
 // SendChordRPC performs a synchronous HTTP POST/GET overlay RPC with telemetry.
 func (t *NetworkTransport) SendChordRPC(target string, endpoint string, req interface{}, resp interface{}) (resultErr error) {
 	defer func() {
+		if resultErr != nil && t.maintenance != nil && t.requestContext().Err() == nil {
+			t.maintenance.Activity(time.Now(), "chord_rpc_failure")
+		}
 		if resultErr != nil && t.telemetry != nil {
 			t.telemetry.Emit("chord_rpc_error", "", map[string]interface{}{"target_addr": target, "endpoint": endpoint, "error": resultErr.Error()})
 		}
@@ -428,6 +432,9 @@ func (t *NetworkTransport) handleState(w http.ResponseWriter, r *http.Request) {
 
 func (t *NetworkTransport) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	summary := t.metrics.GetSummary()
+	if t.maintenance != nil {
+		summary["maintenance"] = t.maintenance.Metrics()
+	}
 	summary["network"] = map[string]interface{}{
 		"msgs_sent":      atomic.LoadUint64(&t.msgsSent),
 		"msgs_received":  atomic.LoadUint64(&t.msgsReceived),

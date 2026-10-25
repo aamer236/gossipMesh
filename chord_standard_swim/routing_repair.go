@@ -106,23 +106,37 @@ func (n *ChordNode) MarkReferencesDirty(peer *NodeRef) AffectedReferences {
 	return a
 }
 
+func (n *ChordNode) hasDirtyReferences(key string) bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	for _, owner := range n.dirty {
+		if owner == key {
+			return true
+		}
+	}
+	return false
+}
+
 type RepairResult struct {
 	Repaired          int      `json:"repaired"`
 	Pending           bool     `json:"pending"`
 	Errors            []string `json:"errors,omitempty"`
 	SuccessorPromoted bool     `json:"successor_promoted"`
+	BackupsValidated  bool     `json:"backups_validated"`
 }
 
 // Recompute only affected fingers. A small batch yields between peers, while a
 // confirmed-dead successor is always repaired before any fingers. Membership
 // supplies no candidate owner; all candidates come from local Chord references.
-func (n *ChordNode) RepairPeerReferences(peer *NodeRef, inc uint64, state MemberState, batch int, t *Telemetry) RepairResult {
+func (n *ChordNode) RepairPeerReferences(peer *NodeRef, inc uint64, state MemberState, batch int, t *Telemetry, refreshRequested bool) RepairResult {
 	result := RepairResult{}
 	if !n.hintCurrent(peer, inc, state) {
 		result.Errors = append(result.Errors, "membership event superseded")
 		return result
 	}
 	before := n.GetRoutingSnapshot()
+	refs := affected(before, peer)
+	refreshBackups := state == Dead && (refs.Successor || refs.SuccessorList > 0 || before.Successor == nil || refreshRequested)
 	if state == Dead {
 		if samePeer(before.Successor, peer) || before.Successor == nil {
 			n.mu.RLock()
@@ -158,8 +172,10 @@ func (n *ChordNode) RepairPeerReferences(peer *NodeRef, inc uint64, state Member
 		n.mu.Unlock()
 	}
 	// Refresh the chosen successor's own backups through ordinary stabilization.
-	n.Stabilize()
-	if state == Dead && (before.Successor != nil || len(before.Successors) > 0) {
+	if refreshBackups {
+		n.Stabilize()
+	}
+	if refreshBackups {
 		snapshot := n.GetRoutingSnapshot()
 		valid := snapshot.Successor != nil && len(snapshot.Successors) > 0 && samePeer(snapshot.Successor, snapshot.Successors[0])
 		for i, ref := range snapshot.Successors {
@@ -173,6 +189,7 @@ func (n *ChordNode) RepairPeerReferences(peer *NodeRef, inc uint64, state Member
 			}
 		}
 		if valid {
+			result.BackupsValidated = true
 			t.Emit("successor_list_refreshed", peerID(peer), map[string]interface{}{"entries": len(snapshot.Successors), "criterion": "clockwise and reachable local backups"})
 		} else {
 			result.Errors = append(result.Errors, "successor list not yet validated")
@@ -193,8 +210,11 @@ func (n *ChordNode) RepairPeerReferences(peer *NodeRef, inc uint64, state Member
 			return result
 		}
 		if index == 0 {
+			// A newer ALIVE can supersede a queued death before failover.
+			// Validate the retained successor before retiring its dirty marker.
+			aliveSuccessor := state == Alive && n.transport.PingRPC(peer.Addr) == nil
 			n.mu.Lock()
-			if n.Successor != nil && !samePeer(n.Successor, peer) {
+			if n.Successor != nil && (!samePeer(n.Successor, peer) || (aliveSuccessor && n.hintCurrent(peer, inc, state))) {
 				delete(n.dirty, index)
 			}
 			n.mu.Unlock()

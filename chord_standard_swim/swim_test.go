@@ -412,3 +412,43 @@ func TestSWIMNewAliveCancelsSuspicionAndPersistenceErrorsSurface(t *testing.T) {
 		t.Fatal("published an incarnation that was not persisted")
 	}
 }
+
+func TestRecentAckCannotComeFromGossipOrSurviveTransitions(t *testing.T) {
+	m := testMembership(t, 0)
+	now := time.Unix(100, 0)
+	m.now = func() time.Time { return now }
+	u := Update{Peer: testPeer(1), State: Alive, Incarnation: 1}
+	mergeForTest(t, m, u)
+	if m.RecentAck(u.Peer) {
+		t.Fatal("gossip counted as ACK")
+	}
+	m.Acknowledge(u)
+	if !m.RecentAck(u.Peer) {
+		t.Fatal("ACK not shared")
+	}
+	now = now.Add(m.cfg.Interval)
+	if m.RecentAck(u.Peer) {
+		t.Fatal("expired ACK shared")
+	}
+	m.Acknowledge(u)
+	u.State = Suspect
+	mergeForTest(t, m, u)
+	if m.RecentAck(u.Peer) {
+		t.Fatal("suspected peer used old ACK")
+	}
+	u.State = Alive
+	u.Incarnation++
+	mergeForTest(t, m, u)
+	if m.RecentAck(u.Peer) {
+		t.Fatal("new incarnation inherited old ACK")
+	}
+	m.Acknowledge(u)
+	if !m.RecentAck(u.Peer) {
+		t.Fatal("new valid ACK ignored")
+	}
+	u.State = Dead
+	mergeForTest(t, m, u)
+	if m.RecentAck(u.Peer) {
+		t.Fatal("dead peer used old ACK")
+	}
+}
